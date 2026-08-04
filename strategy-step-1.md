@@ -12,6 +12,23 @@ suitable for fine-tuning a pretrained SmolVLA checkpoint via LeRobot. This datas
 is the input to the SFT training run (which happens on a rented GPU, out of scope
 for this phase).
 
+## Deliverable of this phase
+
+Two things, not one:
+
+1. A data-generating engine for trajectories — the scripted/IK cold-start pipeline
+   described below, capable of producing pick-and-place episodes across squares,
+   board configurations, and piece types on demand.
+2. Tooling to monitor and evaluate the quality and validity of the data that engine
+   produces — not a one-off manual spot-check, but a repeatable workflow that lets
+   quality be checked at multiple points along the generation process (e.g. per-
+   episode validity right after generation, and again in aggregate once a batch or
+   the full dataset is assembled). The point is to catch bad data close to its
+   source rather than discovering it only once it shows up as a failed SFT run.
+
+Both are in scope for this phase; neither is optional. The generation engine
+without a way to evaluate its output is not a trustworthy deliverable on its own.
+
 ## Cold start: scripted/IK-generated trajectories, no teleop required
 
 The first batch of training data does not require a human operator, a leader arm,
