@@ -1,0 +1,235 @@
+<mujoco model="bench_chess_scene">
+  <compiler angle="radian"/>
+  <option timestep="0.002"/>
+
+  <visual>
+    <headlight ambient="0.3 0.3 0.3" diffuse="0.4 0.4 0.4" specular="0.1 0.1 0.1"/>
+    <quality shadowsize="1024" offsamples="4"/>
+    <map znear="0.01" zfar="20"/>
+    <global offwidth="512" offheight="512"/>
+  </visual>
+
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.85 0.85 0.85" rgb2="0.2 0.2 0.2"
+             width="256" height="256"/>
+    <material name="table" rgba="0.55 0.42 0.30 1" specular="0.2" shininess="0.3"/>
+    <material name="light_square" rgba="0.92 0.88 0.78 1" specular="0.1"/>
+    <material name="dark_square" rgba="0.35 0.24 0.16 1" specular="0.1"/>
+    <material name="white_piece" rgba="0.90 0.88 0.82 1" specular="0.4" shininess="0.5"/>
+    <material name="black_piece" rgba="0.12 0.11 0.10 1" specular="0.4" shininess="0.5"/>
+    <material name="arm" rgba="0.30 0.32 0.36 1" specular="0.5" shininess="0.6"/>
+    <material name="floor" texture="grid" texrepeat="8 8" rgba="0.6 0.6 0.6 1"/>
+  </asset>
+
+  <default>
+    <default class="square">
+      <geom type="box" size="0.025 0.025 0.004" contype="0" conaffinity="0"/>
+    </default>
+    <default class="piece">
+      <geom type="cylinder" size="0.016 0.018" material="white_piece" mass="0.02"/>
+    </default>
+    <default class="link">
+      <geom type="capsule" material="arm" size="0.022"/>
+      <joint type="hinge" damping="1" range="-3.0 3.0"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <light name="key" pos="0.35 -0.35 1.2" dir="-0.3 0.3 -1" diffuse="0.7 0.7 0.7"
+           specular="0.2 0.2 0.2" castshadow="true"/>
+    <light name="fill" pos="-0.4 0.4 1.0" dir="0.4 -0.4 -1" diffuse="0.25 0.25 0.25"
+           specular="0 0 0" castshadow="false"/>
+
+    <geom name="floor" type="plane" size="3 3 0.1" pos="0 0 0" material="floor"/>
+    <geom name="table" type="box" size="0.45 0.45 0.36" pos="0.25 0 0.36" material="table"/>
+
+    <body name="board" pos="0.35 0 0.724">
+      <geom name="board_base" type="box" size="0.21 0.21 0.008" pos="0 0 -0.008"
+            material="dark_square"/>
+      <geom name="sq_a1" class="square" pos="-0.175 -0.175 0" material="dark_square"/>
+      <geom name="sq_b1" class="square" pos="-0.125 -0.175 0" material="light_square"/>
+      <geom name="sq_c1" class="square" pos="-0.075 -0.175 0" material="dark_square"/>
+      <geom name="sq_d1" class="square" pos="-0.025 -0.175 0" material="light_square"/>
+      <geom name="sq_e1" class="square" pos="0.025 -0.175 0" material="dark_square"/>
+      <geom name="sq_f1" class="square" pos="0.075 -0.175 0" material="light_square"/>
+      <geom name="sq_g1" class="square" pos="0.125 -0.175 0" material="dark_square"/>
+      <geom name="sq_h1" class="square" pos="0.175 -0.175 0" material="light_square"/>
+      <geom name="sq_a2" class="square" pos="-0.175 -0.125 0" material="light_square"/>
+      <geom name="sq_b2" class="square" pos="-0.125 -0.125 0" material="dark_square"/>
+      <geom name="sq_c2" class="square" pos="-0.075 -0.125 0" material="light_square"/>
+      <geom name="sq_d2" class="square" pos="-0.025 -0.125 0" material="dark_square"/>
+      <geom name="sq_e2" class="square" pos="0.025 -0.125 0" material="light_square"/>
+      <geom name="sq_f2" class="square" pos="0.075 -0.125 0" material="dark_square"/>
+      <geom name="sq_g2" class="square" pos="0.125 -0.125 0" material="light_square"/>
+      <geom name="sq_h2" class="square" pos="0.175 -0.125 0" material="dark_square"/>
+      <geom name="sq_a3" class="square" pos="-0.175 -0.075 0" material="dark_square"/>
+      <geom name="sq_b3" class="square" pos="-0.125 -0.075 0" material="light_square"/>
+      <geom name="sq_c3" class="square" pos="-0.075 -0.075 0" material="dark_square"/>
+      <geom name="sq_d3" class="square" pos="-0.025 -0.075 0" material="light_square"/>
+      <geom name="sq_e3" class="square" pos="0.025 -0.075 0" material="dark_square"/>
+      <geom name="sq_f3" class="square" pos="0.075 -0.075 0" material="light_square"/>
+      <geom name="sq_g3" class="square" pos="0.125 -0.075 0" material="dark_square"/>
+      <geom name="sq_h3" class="square" pos="0.175 -0.075 0" material="light_square"/>
+      <geom name="sq_a4" class="square" pos="-0.175 -0.025 0" material="light_square"/>
+      <geom name="sq_b4" class="square" pos="-0.125 -0.025 0" material="dark_square"/>
+      <geom name="sq_c4" class="square" pos="-0.075 -0.025 0" material="light_square"/>
+      <geom name="sq_d4" class="square" pos="-0.025 -0.025 0" material="dark_square"/>
+      <geom name="sq_e4" class="square" pos="0.025 -0.025 0" material="light_square"/>
+      <geom name="sq_f4" class="square" pos="0.075 -0.025 0" material="dark_square"/>
+      <geom name="sq_g4" class="square" pos="0.125 -0.025 0" material="light_square"/>
+      <geom name="sq_h4" class="square" pos="0.175 -0.025 0" material="dark_square"/>
+      <geom name="sq_a5" class="square" pos="-0.175 0.025 0" material="dark_square"/>
+      <geom name="sq_b5" class="square" pos="-0.125 0.025 0" material="light_square"/>
+      <geom name="sq_c5" class="square" pos="-0.075 0.025 0" material="dark_square"/>
+      <geom name="sq_d5" class="square" pos="-0.025 0.025 0" material="light_square"/>
+      <geom name="sq_e5" class="square" pos="0.025 0.025 0" material="dark_square"/>
+      <geom name="sq_f5" class="square" pos="0.075 0.025 0" material="light_square"/>
+      <geom name="sq_g5" class="square" pos="0.125 0.025 0" material="dark_square"/>
+      <geom name="sq_h5" class="square" pos="0.175 0.025 0" material="light_square"/>
+      <geom name="sq_a6" class="square" pos="-0.175 0.075 0" material="light_square"/>
+      <geom name="sq_b6" class="square" pos="-0.125 0.075 0" material="dark_square"/>
+      <geom name="sq_c6" class="square" pos="-0.075 0.075 0" material="light_square"/>
+      <geom name="sq_d6" class="square" pos="-0.025 0.075 0" material="dark_square"/>
+      <geom name="sq_e6" class="square" pos="0.025 0.075 0" material="light_square"/>
+      <geom name="sq_f6" class="square" pos="0.075 0.075 0" material="dark_square"/>
+      <geom name="sq_g6" class="square" pos="0.125 0.075 0" material="light_square"/>
+      <geom name="sq_h6" class="square" pos="0.175 0.075 0" material="dark_square"/>
+      <geom name="sq_a7" class="square" pos="-0.175 0.125 0" material="dark_square"/>
+      <geom name="sq_b7" class="square" pos="-0.125 0.125 0" material="light_square"/>
+      <geom name="sq_c7" class="square" pos="-0.075 0.125 0" material="dark_square"/>
+      <geom name="sq_d7" class="square" pos="-0.025 0.125 0" material="light_square"/>
+      <geom name="sq_e7" class="square" pos="0.025 0.125 0" material="dark_square"/>
+      <geom name="sq_f7" class="square" pos="0.075 0.125 0" material="light_square"/>
+      <geom name="sq_g7" class="square" pos="0.125 0.125 0" material="dark_square"/>
+      <geom name="sq_h7" class="square" pos="0.175 0.125 0" material="light_square"/>
+      <geom name="sq_a8" class="square" pos="-0.175 0.175 0" material="light_square"/>
+      <geom name="sq_b8" class="square" pos="-0.125 0.175 0" material="dark_square"/>
+      <geom name="sq_c8" class="square" pos="-0.075 0.175 0" material="light_square"/>
+      <geom name="sq_d8" class="square" pos="-0.025 0.175 0" material="dark_square"/>
+      <geom name="sq_e8" class="square" pos="0.025 0.175 0" material="light_square"/>
+      <geom name="sq_f8" class="square" pos="0.075 0.175 0" material="dark_square"/>
+      <geom name="sq_g8" class="square" pos="0.125 0.175 0" material="light_square"/>
+      <geom name="sq_h8" class="square" pos="0.175 0.175 0" material="dark_square"/>
+    </body>
+
+    <body name="piece_0" pos="0.175 -0.175 0.746">
+      <freejoint/>
+      <geom class="piece"/>
+      <geom type="sphere" size="0.011" pos="0 0 0.024" material="white_piece" mass="0.005"/>
+    </body>
+    <body name="piece_1" pos="0.225 -0.175 0.746">
+      <freejoint/>
+      <geom class="piece"/>
+      <geom type="sphere" size="0.011" pos="0 0 0.024" material="white_piece" mass="0.005"/>
+    </body>
+    <body name="piece_2" pos="0.275 -0.175 0.746">
+      <freejoint/>
+      <geom class="piece"/>
+      <geom type="sphere" size="0.011" pos="0 0 0.024" material="white_piece" mass="0.005"/>
+    </body>
+    <body name="piece_3" pos="0.325 -0.175 0.746">
+      <freejoint/>
+      <geom class="piece"/>
+      <geom type="sphere" size="0.011" pos="0 0 0.024" material="white_piece" mass="0.005"/>
+    </body>
+    <body name="piece_4" pos="0.375 -0.175 0.746">
+      <freejoint/>
+      <geom class="piece"/>
+      <geom type="sphere" size="0.011" pos="0 0 0.024" material="white_piece" mass="0.005"/>
+    </body>
+    <body name="piece_5" pos="0.425 -0.175 0.746">
+      <freejoint/>
+      <geom class="piece"/>
+      <geom type="sphere" size="0.011" pos="0 0 0.024" material="white_piece" mass="0.005"/>
+    </body>
+    <body name="piece_6" pos="0.475 -0.175 0.746">
+      <freejoint/>
+      <geom class="piece"/>
+      <geom type="sphere" size="0.011" pos="0 0 0.024" material="white_piece" mass="0.005"/>
+    </body>
+    <body name="piece_7" pos="0.525 -0.175 0.746">
+      <freejoint/>
+      <geom class="piece"/>
+      <geom type="sphere" size="0.011" pos="0 0 0.024" material="white_piece" mass="0.005"/>
+    </body>
+    <body name="piece_8" pos="0.175 0.175 0.746">
+      <freejoint/>
+      <geom class="piece" material="black_piece"/>
+      <geom type="sphere" size="0.011" pos="0 0 0.024" material="black_piece" mass="0.005"/>
+    </body>
+    <body name="piece_9" pos="0.225 0.175 0.746">
+      <freejoint/>
+      <geom class="piece" material="black_piece"/>
+      <geom type="sphere" size="0.011" pos="0 0 0.024" material="black_piece" mass="0.005"/>
+    </body>
+    <body name="piece_10" pos="0.275 0.175 0.746">
+      <freejoint/>
+      <geom class="piece" material="black_piece"/>
+      <geom type="sphere" size="0.011" pos="0 0 0.024" material="black_piece" mass="0.005"/>
+    </body>
+    <body name="piece_11" pos="0.325 0.175 0.746">
+      <freejoint/>
+      <geom class="piece" material="black_piece"/>
+      <geom type="sphere" size="0.011" pos="0 0 0.024" material="black_piece" mass="0.005"/>
+    </body>
+    <body name="piece_12" pos="0.375 0.175 0.746">
+      <freejoint/>
+      <geom class="piece" material="black_piece"/>
+      <geom type="sphere" size="0.011" pos="0 0 0.024" material="black_piece" mass="0.005"/>
+    </body>
+    <body name="piece_13" pos="0.425 0.175 0.746">
+      <freejoint/>
+      <geom class="piece" material="black_piece"/>
+      <geom type="sphere" size="0.011" pos="0 0 0.024" material="black_piece" mass="0.005"/>
+    </body>
+    <body name="piece_14" pos="0.475 0.175 0.746">
+      <freejoint/>
+      <geom class="piece" material="black_piece"/>
+      <geom type="sphere" size="0.011" pos="0 0 0.024" material="black_piece" mass="0.005"/>
+    </body>
+    <body name="piece_15" pos="0.525 0.175 0.746">
+      <freejoint/>
+      <geom class="piece" material="black_piece"/>
+      <geom type="sphere" size="0.011" pos="0 0 0.024" material="black_piece" mass="0.005"/>
+    </body>
+
+    <body name="base" pos="0 0 0.72">
+      <geom type="cylinder" size="0.05 0.03" pos="0 0 0.015" material="arm"/>
+      <body name="link1" pos="0 0 0.04">
+        <joint name="j1" class="link" axis="0 0 1"/>
+        <geom class="link" fromto="0 0 0 0 0 0.06"/>
+        <body name="link2" pos="0 0 0.06">
+          <joint name="j2" class="link" axis="0 1 0"/>
+          <geom class="link" fromto="0 0 0 0.14 0 0"/>
+          <body name="link3" pos="0.14 0 0">
+            <joint name="j3" class="link" axis="0 1 0"/>
+            <geom class="link" fromto="0 0 0 0.13 0 0"/>
+            <body name="link4" pos="0.13 0 0">
+              <joint name="j4" class="link" axis="0 1 0"/>
+              <geom class="link" size="0.018" fromto="0 0 0 0.06 0 0"/>
+              <body name="wrist" pos="0.06 0 0">
+                <joint name="j5" class="link" axis="1 0 0"/>
+                <geom class="link" size="0.016" fromto="0 0 0 0.03 0 0"/>
+                <geom type="box" size="0.008 0.004 0.018" pos="0.045 0.018 0"
+                      material="arm"/>
+                <geom type="box" size="0.008 0.004 0.018" pos="0.045 -0.018 0"
+                      material="arm"/>
+                <camera name="wrist" pos="0.01 0 0.05" xyaxes="0 -1 0 1 0 0.6" fovy="70"/>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+
+    <camera name="top" pos="0.35 -0.45 1.35" xyaxes="1 0 0 0 0.72 0.69" fovy="45"/>
+  </worldbody>
+
+  <actuator>
+    <position name="a1" joint="j1" kp="40" ctrlrange="-3 3"/>
+    <position name="a2" joint="j2" kp="40" ctrlrange="-3 3"/>
+    <position name="a3" joint="j3" kp="40" ctrlrange="-3 3"/>
+    <position name="a4" joint="j4" kp="20" ctrlrange="-3 3"/>
+    <position name="a5" joint="j5" kp="10" ctrlrange="-3 3"/>
+  </actuator>
+</mujoco>

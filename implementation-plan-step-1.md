@@ -22,8 +22,9 @@ revisited; anything marked **OPEN** should be resolved before the step that cons
 | Disk | ~206 GB free | Ample; video-encoded dataset for ~1000 episodes is expected in the 5–25 GB range. |
 
 Because rendering is the throughput bottleneck on CPU, **every design choice that trades
-image resolution or control frequency against episode count is made explicitly in Step 2
-and re-calibrated in Step 15**, not guessed up front.
+control frequency or episode count against render cost is made explicitly in Step 2 and
+re-calibrated in Step 15**, not guessed up front. Image resolution is the one knob excluded
+from that trade: §0.10 fixes it at 512², and only an RSS-ceiling breach reopens it.
 
 ### Technical decisions
 
@@ -70,6 +71,38 @@ and re-calibrated in Step 15**, not guessed up front.
    bit-for-bit (physics and sampled randomization; rendered pixels compared with a small
    tolerance). This is what makes failures debuggable and the validator meaningful.
 8. **Language**: Python 3.11+ managed by pixi; mypy strict, ruff, pytest — per `AGENTS.md`.
+9. **Cameras**: wrist-mounted only — the overhead `top` camera is dropped. Measured on this
+   host (`docs/render-budget.md`), two cameras cost noticeably more render time than one at
+   every resolution tested; dropping to one camera buys back a meaningful fraction of
+   throughput (see §0.10 for how that throughput is spent). This is a real capability
+   trade-off, not free: Step 11's `PIECE_VISIBLE_AT_START` check was designed against the
+   overhead camera's stable, always-on-board view. A wrist-mounted camera's view depends on
+   the arm's start pose and may not frame the source square at frame 0. Step 11 must replace
+   that check with a privileged-state predicate (source piece pose is on-board and within
+   tolerance of the intended square at frame 0, checked from `MjData`, not pixels) rather
+   than a pixel-segmentation check — tracked as a required change, not deferred. Any other
+   per-episode or aggregate check that assumed two camera keys (e.g. dataset integrity's
+   "every episode has both camera keys") is a single-key check now.
+10. **Resolution**: fixed at **512×512**, not chosen to clear an fps threshold. SmolVLA
+    compresses every frame to a fixed 64 visual tokens via PixelShuffle regardless of input
+    resolution (512² is literally SmolVLA's own published reference example), so there is no
+    model-side compute cost to a higher resolution, and published SmolVLA/LeRobot recipes
+    commonly train at 256–400px, not 128px. Generating at 128² and calling it done — the
+    original plan, before this was raised — would have meant upsampling permanently blurry,
+    low-detail sim frames to whatever resolution the real camera's frames get downsampled to
+    at inference, creating a real train/deploy domain gap (missing edge and texture detail,
+    not just a smaller array) independent of whatever the fps math said. That risk is worse
+    than a slower generation run, so it is not a trade this plan makes to hit a throughput
+    number.
+    RSS is a different kind of constraint and stays a **hard, non-negotiable ceiling**: this
+    host physically has ≤ 1.6 GB to give the generator, so if 512² peak RSS exceeds that
+    ceiling, Step 2 is genuinely blocked and Step 15 must explicitly recalibrate (documented
+    resolution/episode-length reduction) — that is a real fail-hard case, not the same thing
+    as the fps trade-off above. fps, in contrast, is not a physical ceiling: a low measured
+    fps at 512² is recorded and feeds Step 15's episode-count and capture-fps calibration
+    (fewer episodes, lower capture Hz, longer wall-clock budget), not a reason to shrink the
+    image. `MIN_CAMERA_FPS` (4.0) is kept only as a reference point in the recorded rationale,
+    not as a gate that picks the resolution.
 
 ### Proposed repo layout
 
@@ -111,8 +144,7 @@ vla_chess/
 
 | Key | Shape / type | Notes |
 |---|---|---|
-| `observation.images.top` | `(H, W, 3)` uint8 | overhead/third-person camera |
-| `observation.images.wrist` | `(H, W, 3)` uint8 | wrist-mounted camera |
+| `observation.images.wrist` | `(H, W, 3)` uint8 | wrist-mounted camera (sole camera — see §0.9) |
 | `observation.state` | `(6,)` float32 | 5 joint positions + gripper position |
 | `action` | `(6,)` float32 | commanded absolute joint targets for next step |
 | `task` | str | episode-level instruction |
@@ -170,9 +202,11 @@ class Renderer:
 
 **Depends on**: Step 1.
 
-**Why this is a separate, early step**: the render budget determines image resolution,
-control frequency, and realistic episode count. Every later step's cost estimate hangs off
-the number produced here, so it is measured before anything is built on top of it.
+**Why this is a separate, early step**: resolution is fixed by §0.10 (512×512, matching
+SmolVLA's reference resolution), but the render budget measured here still determines
+control frequency and realistic episode count at that resolution. Every later step's cost
+estimate hangs off the number produced here, so it is measured before anything is built on
+top of it.
 
 ### Acceptance Criteria
 - `MUJOCO_GL` is verified to be `osmesa` at import time; constructing a `Renderer` with any
@@ -183,13 +217,15 @@ the number produced here, so it is measured before anything is built on top of i
   scene, not noise or a blank buffer).
 - Unit test: two consecutive renders of the same `MjData` are bit-identical; a render after
   translating the box by 5 cm differs in ≥ 1% of pixels.
-- Benchmark reports, for at least resolutions 128², 224², 256², 320²: frames/sec for one
-  camera and for two cameras, and peak process RSS. Results committed to
-  `docs/render-budget.md`.
-- A working point is chosen and recorded that satisfies: **≥ 4 two-camera observation
-  frames/sec** and **peak RSS ≤ 1.6 GB**. If no tested resolution meets this, the recorded
-  decision is to drop to the highest resolution that does (down to 128²) — documented, not
-  silently applied.
+- Benchmark reports, for at least resolutions 128², 224², 256², 320², 512²: wrist-camera
+  frames/sec and peak process RSS (the production camera count, per §0.9 — not a synthetic
+  multi-camera sweep). Results committed to `docs/render-budget.md`.
+- The working point is **512×512, fixed** (per §0.10 — not chosen by searching for the
+  highest fps-passing resolution). At 512², peak RSS **must be ≤ 1.6 GB** — this is a hard
+  ceiling on this host; exceeding it blocks Step 2 and requires an explicit, documented
+  recalibration in Step 15, not a silent resolution drop. The measured fps at 512² is
+  recorded against the 4 fps reference point for context but does not gate the resolution
+  choice — a shortfall is absorbed by Step 15's episode-count/capture-fps calibration.
 - No memory growth: rendering 2000 frames in a loop increases RSS by < 50 MB from the
   100th frame onward.
 
@@ -202,6 +238,12 @@ MJCF fragments in `assets/`, and `scene.py`, which is responsible for (a) buildi
 `MjModel` from a scene description and (b) the algebraic mapping between chess square names
 and world poses.
 
+Must declare `<visual><global offwidth="512" offheight="512"/></visual>` (or larger): MuJoCo
+defaults the offscreen framebuffer to 480px, and `mujoco.Renderer` raises a hard `ValueError`
+constructing a context above that size. Found the hard way benchmarking `bench_scene.xml` at
+512² (§0.10) — every scene MJCF that gets rendered at the target resolution needs this
+explicitly, it is not inherited from anywhere else.
+
 Includes: vendoring the SO-101 MJCF from
 [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100)`/Simulation/SO101/`
 (Apache-2.0, pinned to a commit SHA) into `assets/so101/`, using `so101_new_calib.xml`;
@@ -210,8 +252,8 @@ collision meshes) and fixing up the gripper's linear joint (0=closed, 100=open) 
 which is not yet correct in the upstream files; a parametric board body (8×8 squares, known
 square pitch, placed on the table with a settable position + yaw); simple convex piece
 geometries (at minimum pawn/rook/bishop/knight/queen/king as primitive-composed bodies with
-free joints), each with mass/friction properties in a plausible range; two cameras from
-Step 2 (overhead `top`, wrist-mounted `wrist`).
+free joints), each with mass/friction properties in a plausible range; the wrist camera
+from Step 2 (per §0.9, the sole camera — no overhead `top` camera).
 
 **Interface**:
 ```python
@@ -250,7 +292,7 @@ def build_scene(desc: SceneDescription) -> tuple[mujoco.MjModel, SceneIndex]
   pose, the board placement is adjusted until ≥ 60 of 64 squares are reachable, or the
   unreachable set is explicitly excluded from sampling in Step 4** — no silent failures.
 - Scene loads and renders through Step 2's `Renderer` producing a visibly non-uniform image
-  (pixel standard deviation > 10 counts on both cameras).
+  (pixel standard deviation > 10 counts on the wrist camera).
 
 ---
 
@@ -264,8 +306,8 @@ lighting, plus camera jitter, distractor pieces, and physical property jitter.
 Randomized fields and their ranges (ranges are config, defaults recorded in `config.py`):
 board xy ±3 cm, board yaw ±15°, piece type from the enabled set, piece visual style/colour,
 piece scale ±5%, piece mass/friction ±20%, light position/direction/diffuse intensity,
-ambient level, table/board texture variant, both camera poses jittered ±1 cm / ±2°, 0–6
-distractor pieces on other squares, source and target squares.
+ambient level, table/board texture variant, the wrist camera's pose jittered ±1 cm / ±2°,
+0–6 distractor pieces on other squares, source and target squares.
 
 **Interface**:
 ```python
@@ -520,7 +562,7 @@ class ObservationRecorder:
 - Alignment test: with a synthetic executor emitting `state[t] = t` and `action[t] = t+1`,
   the recorded frames satisfy `action[i] == state[i+1]` for all `i < T-1` — i.e. the
   convention is enforced by test, not by comment.
-- Every frame contains both camera keys, uint8, of the configured shape.
+- Every frame contains the `wrist` camera key, uint8, of the configured shape.
 - Image sanity per frame: pixel std > 5 counts and mean in `[10, 245]` — rejects all-black
   (renderer failure) and all-white (blown-out lighting) frames at the source.
 - Wrist camera moves: over an episode, mean absolute inter-frame pixel difference on `wrist`
@@ -611,7 +653,8 @@ exist — failures are first-class data, not exceptions, because Step 14 reports
 - Throughput measured and recorded in `docs/render-budget.md`: seconds per episode, and the
   fraction spent in rendering vs. physics vs. IK. **Recorded, with a target of ≤ 120 s per
   episode at the chosen working point**; if exceeded, Step 15's calibration must reduce
-  resolution, fps, or episode duration to meet it before the full run.
+  capture fps, episode duration, or episode count to meet it before the full run — not
+  resolution, which §0.10 fixes independently of throughput.
 - Steady-state RSS over 20 consecutive episodes stays ≤ 1.6 GB with no monotonic growth.
 
 ---
@@ -640,9 +683,11 @@ end-effector displacement below a kinematic bound).
 re-parses).
 
 *Visual integrity* — `IMAGES_NOT_BLANK`, `IMAGES_NOT_STATIC` (episode has real motion:
-mean inter-frame difference above floor), `PIECE_VISIBLE_AT_START` (source piece pixels
-present in the top camera at frame 0, via a known-colour segmentation of the piece geom),
-`GRIPPER_VISIBLE` in the wrist view, `EXPOSURE_IN_RANGE`.
+mean inter-frame difference above floor), `PIECE_ON_BOARD_AT_START` (source piece pose is
+on-board and within tolerance of the intended square at frame 0 — checked from privileged
+`MjData` state, not pixels; per §0.9, the wrist camera's frame-0 framing is pose-dependent
+so pixel segmentation can't be the check here), `GRIPPER_VISIBLE` in the wrist view,
+`EXPOSURE_IN_RANGE`.
 
 *Language integrity* — `INSTRUCTION_MATCHES_SPEC` (squares/piece in text agree with the spec).
 
@@ -778,8 +823,8 @@ assembled dataset directory (a batch or the full dataset), independently of the 
 so it can be run at any time and on any dataset.
 
 **Aggregate checks**:
-- *Integrity*: dataset loads; frame counts match metadata; every episode has both camera
-  streams decodable end-to-end (decode a sampled subset fully, all episodes at least
+- *Integrity*: dataset loads; frame counts match metadata; every episode has its wrist
+  camera stream decodable end-to-end (decode a sampled subset fully, all episodes at least
   partially); no duplicate `index`; fps consistent; no episode below/above the length bounds;
   every dataset episode has a matching `generation.jsonl` record and vice versa.
 - *Statistical*: per-dimension distributions of `state` and `action` (min/max/mean/std,
@@ -855,12 +900,14 @@ dataset. Three sub-stages, each gated:
 aggregate. Human-review the contact sheet. Record throughput, success rate, and RSS. Curate
 the golden fixture sets promised in Step 11 (10 good, 10 bad episodes) from this batch.
 
-**15b — Calibration.** Adjust the knobs against measured evidence: image resolution, capture
-fps, episode duration bounds, randomization ranges (widen anything the Step 14 report shows
+**15b — Calibration.** Adjust the knobs against measured evidence: capture fps, episode
+duration bounds, episode count, randomization ranges (widen anything the Step 14 report shows
 as under-dispersed; narrow anything driving failures), IK/controller gains, validator
-thresholds (only with justification recorded), video encoding preset. Re-run a 25-episode
-pilot after changes. Iterate until the gate below passes. Every knob change is committed
-with the report that motivated it.
+thresholds (only with justification recorded), video encoding preset. Image resolution is
+**not** in this set: §0.10 fixes it at 512², and it is reopened only if the RSS ceiling is
+breached, as an explicitly documented recalibration. Re-run a 25-episode pilot after changes.
+Iterate until the gate below passes. Every knob change is committed with the report that
+motivated it.
 
 **15c — Full run.** Generate the target batch as a single-process, resumable run under
 `nohup`/systemd-style supervision, with periodic incremental aggregate validation (Step 14
@@ -1018,7 +1065,7 @@ insurance against discovering a corrupt dataset after a multi-day run.
 
 | Risk | Signal | Mitigation |
 |---|---|---|
-| osmesa rendering too slow for a useful dataset | Step 2 benchmark below 4 fps two-camera | Drop resolution to 128²; reduce capture fps to 10; shorten episodes; accept 500 rather than 1000 episodes. Decision recorded in `docs/render-budget.md`. |
+| osmesa rendering too slow for a useful dataset at the fixed 512² resolution | Step 2 benchmark well below 4 fps at 512² | No longer resolved by shrinking the image (§0.10 fixes resolution regardless of fps) — absorbed by Step 15's episode-count/capture-fps calibration instead. Only resolution's own hard ceiling is RSS > 1.6 GB, which is a real blocker, not a throughput one. Residual: Step 10's full-pipeline (physics+IK+render) throughput on the real scene is still unmeasured and could still make episode counts impractically low. |
 | Vendored SO-101 MJCF fails Step 3 acceptance (base collisions, gripper joint fix, compile/reachability) | Step 3 blocked | Hard stop. Fix the asset (patch collisions/joint mapping, or escalate upstream) before proceeding — no silent substitution. |
 | `mink` IK fails to converge near the board surface | Step 5 convergence < 98% | Treated as a scene/reachability problem (target range, joint limits), not a solver swap — tune task weights and Step 3/4 reachability bounds first. |
 | Grasping is unreliable (pieces slip) | Step 7/15a success rate < 85% | Tune gripper friction/geometry, grasp height, and closure force; widen piece geometry tolerance; these are scene parameters, not code changes. |
