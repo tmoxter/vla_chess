@@ -18,8 +18,13 @@ def _run_pytest(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_fully_deselected_run_exits_zero() -> None:
-    """A marker filter that discards every collected test reports success."""
-    result = _run_pytest("-m", "slow", "tests")
+    """A marker filter that discards every collected test reports success.
+
+    Scoped to `tests/unit` deliberately, not `tests/` — `tests/integration` holds the
+    slow-marked 2000-frame render test, and this exit-code check must not run it as a
+    side effect of an unrelated `-m slow` filter.
+    """
+    result = _run_pytest("-m", "slow", "tests/unit")
     assert result.returncode == pytest.ExitCode.OK, result.stdout
 
 
