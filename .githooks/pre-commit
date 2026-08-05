@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+
+if ! command -v pixi >/dev/null 2>&1; then
+    if [ -x "$HOME/.pixi/bin/pixi" ]; then
+        export PATH="$HOME/.pixi/bin:$PATH"
+    else
+        echo "pre-commit: pixi not found on PATH; install pixi to run the quality gate" >&2
+        exit 1
+    fi
+fi
+
+exec pixi run --manifest-path "$repo_root/pyproject.toml" precommit

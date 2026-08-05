@@ -1,0 +1,83 @@
+[project]
+name = "vla-chess"
+version = "0.1.0"
+description = "Simulated chess pick-and-place trajectory generation for VLA fine-tuning"
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vla_chess"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tool.pixi.dependencies]
+python = ">=3.11,<3.13"
+mujoco = ">=3.2"
+numpy = ">=1.26"
+ffmpeg = ">=6.0"
+
+[tool.pixi.pypi-dependencies]
+mink = ">=0.0.4"
+vla-chess = { path = ".", editable = true }
+
+[tool.pixi.feature.dev.dependencies]
+pytest = ">=8.0"
+pytest-cov = ">=5.0"
+mypy = ">=1.11"
+ruff = ">=0.6"
+
+[tool.pixi.environments]
+default = { features = ["dev"], solve-group = "default" }
+
+[tool.pixi.tasks]
+install-hooks = "git config core.hooksPath .githooks"
+test = "pytest -m 'not slow' tests/unit"
+test-slow = "pytest -m slow tests"
+typecheck = "mypy src"
+lint = "ruff check . && ruff format --check ."
+format = "ruff format ."
+precommit = { depends-on = ["lint", "typecheck", "test"] }
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+markers = [
+    "slow: test is CPU-expensive and opt-in (deselected by default in the `test` task)",
+    "render: test requires the osmesa software renderer",
+]
+
+[tool.mypy]
+mypy_path = ["src"]
+strict = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+disallow_any_generics = true
+check_untyped_defs = true
+no_implicit_optional = true
+strict_optional = true
+warn_return_any = true
+warn_unused_ignores = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unreachable = true
+strict_equality = true
+extra_checks = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "ANN", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN401"]
