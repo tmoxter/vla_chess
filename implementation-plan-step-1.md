@@ -304,10 +304,37 @@ domain randomization the strategy doc requires: board position/orientation, piec
 lighting, plus camera jitter, distractor pieces, and physical property jitter.
 
 Randomized fields and their ranges (ranges are config, defaults recorded in `config.py`):
-board xy ±3 cm, board yaw ±15°, piece type from the enabled set, piece visual style/colour,
-piece scale ±5%, piece mass/friction ±20%, light position/direction/diffuse intensity,
-ambient level, table/board texture variant, the wrist camera's pose jittered ±1 cm / ±2°,
-0–6 distractor pieces on other squares, source and target squares.
+board xy ±3 cm, board yaw ±15°, board square pitch uniform in [0.03, 0.05] m (product
+decision: the trained policy should generalize across chess-set sizes, not just position and
+angle — see "Board pose feasibility" below for why this is sampled per-episode rather than
+fixed), piece type from the enabled set, piece visual style/colour, piece scale ±5%, piece
+mass/friction ±20%, light position/direction/diffuse intensity, ambient level, table/board
+texture variant, the wrist camera's pose jittered ±1 cm / ±2°, 0–6 distractor pieces on other
+squares, source and target squares.
+
+### Board pose feasibility: reject-and-resample, not a pre-cleared envelope
+
+Step 3's envelope sweep (`pixi run reachability-probe`, `docs/reachability.md`) checked
+whether the *entire* cross-product of the ranges above (pitch × xy jitter × yaw jitter) is
+simultaneously safe from the nominal board pose, and it isn't — for either direction of the
+one free knob available (the nominal board offset from the arm):
+- At the nominal 0.28 m offset, the worst corner (pitch 0.05, board pulled 3 cm toward the
+  arm, yawed 15°) has only 6.2 cm of clearance between a square and the arm base's own
+  collision proxy, against the 10.9 cm needed (base footprint + a standing piece's foot
+  radius + margin — see `reachability.MIN_SQUARE_CLEARANCE`).
+- Pushing the nominal offset out to 0.34 m to fix that clears the clearance check (11.8 cm)
+  but collapses worst-corner reachability from 60/64 to 47/64 — the arm's reachable annulus
+  is simply narrower than the full pitch/xy/yaw cross-product at any single offset.
+
+This is not a bug to fix by hunting for a better nominal offset — no offset satisfies "close
+enough to reach and far enough to clear" at once for every corner simultaneously, because
+those two requirements pull in opposite directions along the same axis. The resolution is
+architectural: `SpecSampler.sample` draws pitch/xy/yaw per episode as already planned, checks
+the drawn `BoardPose` against `reachability.min_square_clearance` (and, once Step 5 exists,
+real IK feasibility) for that specific draw, and resamples on failure — the same
+reject-and-resample pattern the plan already uses for distractor-square collisions and IK
+targets, not a new mechanism. The nominal board pose stays at 0.28 m and the full pitch/xy/yaw
+ranges above are kept; only individual draws landing in the infeasible corner are rejected.
 
 **Interface**:
 ```python
@@ -352,6 +379,9 @@ squares unvisited by chance.
 - Applying a spec to a scene is verified: `apply_spec(model, data, spec)` yields a board yaw
   matching the spec to within 1e-6 rad and a source piece resting on the source square
   (per Step 3's `world_to_square`).
+- Board pose feasibility: every emitted spec's `BoardPose` passes
+  `reachability.min_square_clearance`; specs failing it are resampled, not emitted, and the
+  resample rate is logged (a high rate is a signal to revisit the ranges, not silently eaten).
 - Unit tests run with no rendering and complete in < 5 s total.
 
 ---
@@ -1068,6 +1098,8 @@ insurance against discovering a corrupt dataset after a multi-day run.
 | osmesa rendering too slow for a useful dataset at the fixed 512² resolution | Step 2 benchmark well below 4 fps at 512² | No longer resolved by shrinking the image (§0.10 fixes resolution regardless of fps) — absorbed by Step 15's episode-count/capture-fps calibration instead. Only resolution's own hard ceiling is RSS > 1.6 GB, which is a real blocker, not a throughput one. Residual: Step 10's full-pipeline (physics+IK+render) throughput on the real scene is still unmeasured and could still make episode counts impractically low. |
 | Vendored SO-101 MJCF fails Step 3 acceptance (base collisions, gripper joint fix, compile/reachability) | Step 3 blocked | Hard stop. Fix the asset (patch collisions/joint mapping, or escalate upstream) before proceeding — no silent substitution. |
 | `mink` IK fails to converge near the board surface | Step 5 convergence < 98% | Treated as a scene/reachability problem (target range, joint limits), not a solver swap — tune task weights and Step 3/4 reachability bounds first. |
+| Board/table placement geometry (table height, board offset from the arm base, square pitch) is a simulation-only guess with no real SO-101 unit or physical chessboard behind it | Step 3's "64/64 reachable" and Step 5's IK convergence rate are both only self-consistency checks against that guessed geometry, not confirmation against hardware | Not resolved by any amount of additional simulation, including a clean Step 5 IK pass. Stays open until an actual SO-101 mount height and board placement are measured and `pixi run reachability-probe` is re-run against those numbers. |
+| No single nominal board offset is simultaneously reachable and clear-of-self-collision across the full Step 4 pitch×xy×yaw randomization envelope | `docs/reachability.md` envelope section: at 0.28 m worst-corner clearance is 6.2 cm vs 10.9 cm required; at 0.34 m (chosen to fix that) worst-corner reachability drops to 47/64 | **Resolved, not open**: this was never solvable by picking a better offset (the two requirements pull in opposite directions on the same axis) — Step 4's `SpecSampler` checks `min_square_clearance` per drawn spec and resamples on failure instead, per §4 "Board pose feasibility". Nominal offset stays 0.28 m; full ranges are kept. |
 | Grasping is unreliable (pieces slip) | Step 7/15a success rate < 85% | Tune gripper friction/geometry, grasp height, and closure force; widen piece geometry tolerance; these are scene parameters, not code changes. |
 | Diversity criteria fail despite randomization | Step 6/14 diversity checks red | Ranges are config; widen and re-run the cheap Stage A dry-run to confirm before regenerating. |
 | RAM ceiling hit during long runs | RSS guard trips | Frames stream to the writer; model reuse audited in Step 10; guard exits cleanly and the run resumes. |
