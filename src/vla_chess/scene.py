@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Final
@@ -41,27 +41,161 @@ BOARD_BASE_RGBA: Final = (0.30, 0.20, 0.14, 1.0)
 LIGHT_SQUARE_RGBA: Final = (0.92, 0.88, 0.78, 1.0)
 DARK_SQUARE_RGBA: Final = (0.35, 0.24, 0.16, 1.0)
 
-# The chosen default board pose was picked by a coarse geometric reachability probe (see
-# docs/reachability.md): centred at this offset with a standard 0.05 m pitch, all 64 squares
-# fall inside the arm's sampled reach envelope at near-table height. Pitch and offset are
-# themselves unconfirmed guesses (see caveat above), not a measured board's dimensions.
+# This offset was first suggested by a coarse geometric reachability probe (see
+# docs/reachability.md), but what settled it is that the scene was inspected by eye at this
+# placement and signed off: the resting and birds-eye views below, and the framing claims
+# recorded with them, are all what this board distance looks like through the wrist camera.
+#
+# So do not re-tune this against a reach count. Square-coverage numbers move by a few squares
+# between nearby offsets and will happily argue for a placement nobody has ever looked at,
+# which is how a second board distance got into the tree once already. If it moves, the views
+# have to be re-inspected and every board-dependent figure in this module re-derived. Pitch and
+# offset remain unconfirmed guesses (see caveat above), not a measured board's dimensions.
 DEFAULT_SQUARE_PITCH: Final = 0.05
 DEFAULT_BOARD_X: Final = 0.28
 DEFAULT_BOARD_Y: Final = 0.0
-DEFAULT_BOARD_YAW: Final = 0.0
+
+# The arm plays from behind the black back rank, not from a neutral side seat. The arm's base
+# is pinned at the world origin by the vendored asset, so this is expressed by rotating the
+# board rather than moving the arm: files a->h run along board-local x and ranks 1->8 along
+# board-local y, so a quarter turn puts rank 8 on the near (arm) side and rank 1 on the far
+# side, with the a1-h8 diagonal running away to the arm's right.
+#
+# Rotating a square board a quarter turn about its own centre maps the board onto itself, so
+# the 64 square centres keep exactly the same world positions and only their labels move.
+# docs/reachability.md's verdicts carry over unchanged rather than needing a re-probe — that
+# holds for the jittered envelope too, since yaw jitter about 90 deg is congruent to the same
+# jitter about 0 deg.
+DEFAULT_BOARD_YAW: Final = np.pi / 2
 
 # Playing-surface height (world z where a piece's base rests): the board base's top face
 # plus the square overlay's own half-thickness, both stacked on the tabletop.
 SURFACE_HEIGHT: Final = TABLE_TOP_Z + 2 * BOARD_BASE_HALF_THICKNESS + SQUARE_HALF_THICKNESS
 
+GRIPPER_BODY_NAME: Final = "gripper"
+
 WRIST_CAMERA_NAME: Final = "wrist"
-WRIST_CAMERA_BODY: Final = "gripper"
-# Offset to the side of the gripper's own motor housing (see docs/reachability.md for how
-# this was chosen) so the camera looks past the mechanism at the workspace below, rather
-# than straight into it.
-WRIST_CAMERA_POS: Final = (0.0, 0.045, -0.01)
-WRIST_CAMERA_XYAXES: Final = (1.0, 0.0, 0.0, 0.0, 0.3, 1.0)
-WRIST_CAMERA_FOVY: Final = 65.0
+WRIST_CAMERA_BODY: Final = GRIPPER_BODY_NAME
+
+
+@dataclass(frozen=True)
+class WristCameraMount:
+    """A wrist-camera mount: position, orientation, and field of view, all in the
+    `gripper` body's local frame. Four are provided (`WRIST_CAMERA_MOUNT_OVERHEAD`,
+    `WRIST_CAMERA_MOUNT_SIDE`, `WRIST_CAMERA_MOUNT_SIDE_RESTING`, and
+    `WRIST_CAMERA_MOUNT_RESTING_OVER_JAWS`) as alternatives to compare empirically, since
+    none is obviously better a priori — see the module-level comment above each for the
+    tradeoff.
+
+    A mount's orientation is only meaningful together with an arm pose: the camera is
+    rigidly attached to the gripper, so `xyaxes` fixes the view relative to the mechanism,
+    not relative to the board. `WRIST_CAMERA_MOUNT_RESTING_OVER_JAWS` in particular is
+    solved for `RESTING_ARM_QPOS` and is not a general-purpose framing.
+    """
+
+    pos: tuple[float, float, float]
+    xyaxes: tuple[float, float, float, float, float, float]
+    fovy: float
+
+
+# Mirrors TheRobotStudio/SO-ARM100's own wrist-cam mounts (see `VENDORED.md` and
+# `Optional/Wrist_Cam_Mount_*` upstream): bolted on above the wrist-roll body, tipped down
+# to look over the fingers at the workspace beyond, rather than straight along the roll
+# axis or into the mechanism. `gripperframe` (the TCP) and the moving jaw both sit ~9-10 cm
+# along the body's local -z axis, which is also ~world-up when the arm reaches down at the
+# board — so the camera's "right" axis is the body's local -y (the arm's own lateral
+# direction, stable across reach poses), not local x (the arm's own forward-reach
+# direction): aiming "right" along local x made renders look sideways, wiring
+# image-horizontal to depth instead of to lateral. "Up" spans local x/z so it tips
+# forward-and-up out of the downward view, not sideways.
+#
+# Tradeoff: the gripper's open/close joint rotates about the body's local y axis (the same
+# axis this mount uses as image-right), so the jaw's swing is confined to the local x-z
+# plane — the same plane this mount's "up" spans. That makes the jaw's motion project as
+# mostly vertical (up/down) in the rendered image, not left-right, no matter how this
+# mount's tilt is tuned: right and up are two directions within one shared 2D plane, and
+# there is no roll of that plane which puts the swing on "right" without also rotating the
+# board out of "upright" by nearly the same amount (verified: at the halfway compromise
+# roll, the board was visibly ~45 deg off-level). Board orientation was prioritized here.
+WRIST_CAMERA_MOUNT_OVERHEAD: Final = WristCameraMount(
+    pos=(0.0, 0.0, 0.14),
+    xyaxes=(0.0, -1.0, 0.0, 1.4, 0.0, 0.5),
+    fovy=75.0,
+)
+
+# Alternative mount: matches the reference hardware photo, which bolts the camera directly
+# onto the gripper's own fixed follower piece (`wrist_roll_follower_so101_v1`, the 3D-printed
+# body this camera is already attached to) near its distal end, not onto the wrist-roll servo
+# housing further back. In the `gripper` body's local frame, the follower piece's own mesh and
+# the jaw pivot sit around local z=-0.02 to -0.03, while the wrist-roll servo housing and the
+# wrist_flex joint (one body up the chain) sit around local z=+0.02 to +0.06 — so placing the
+# camera at negative local z, rather than the positive z used by WRIST_CAMERA_MOUNT_OVERHEAD,
+# puts the servo housing and that extra joint behind the camera instead of in frame, matching
+# the photo. Right/up axes are unchanged from WRIST_CAMERA_MOUNT_OVERHEAD (already proven to
+# read the board as upright); only the position moved forward along the mechanism. Verified
+# before picking these numbers: rendered at the hover pose, the servo housing and wrist_flex
+# joint are fully out of frame, and open vs. closed jaw renders still show real fingertip
+# separation (not just a differently angled static shot).
+WRIST_CAMERA_MOUNT_SIDE: Final = WristCameraMount(
+    pos=(0.0, 0.03, -0.02),
+    xyaxes=(0.0, -1.0, 0.0, 1.4, 0.0, 0.5),
+    fovy=75.0,
+)
+
+# Same follower-piece placement philosophy as WRIST_CAMERA_MOUNT_SIDE (forward of the
+# servo/wrist_flex joint, never behind it), but for the resting/board-reading pose rather
+# than close-up move execution. WRIST_CAMERA_MOUNT_SIDE's tight framing is a poor fit there:
+# at rest the arm pulls back and the whole board needs to read, not just the jaw's immediate
+# neighbourhood. Simply widening WRIST_CAMERA_MOUNT_SIDE's fovy in place doesn't work — at
+# that position the lens is close enough to the jaw's own bulk that a wider cone just frames
+# more of the mount's own housing, not more board (verified by rendering it: the jaw's mesh
+# fills over half the image). This mount adds standoff instead: pushed further out along
+# local y and z than WRIST_CAMERA_MOUNT_SIDE so the jaw housing clears the frame, paired with
+# a wider fovy and a shallower tilt. Verified before picking these numbers: at the resting
+# pose, board coverage is comparable to the original (pre-fix) reference render while the
+# servo housing and wrist_flex joint stay out of frame. Trade-off: reused at the close hover
+# pose, this framing is too wide for jaw-tracking (the jaw mechanism re-enters frame) — this
+# mount is for the resting pose specifically, not a drop-in replacement for
+# WRIST_CAMERA_MOUNT_SIDE.
+WRIST_CAMERA_MOUNT_SIDE_RESTING: Final = WristCameraMount(
+    pos=(0.0, 0.06, -0.05),
+    xyaxes=(0.0, -1.0, 0.0, 0.6, 0.0, 1.0),
+    fovy=100.0,
+)
+
+# The resting mount that pairs with RESTING_ARM_QPOS below: the camera looks out over the
+# jaws at the board, so the jaws sit in the lower half of the frame and occlude part of it
+# (the centre when closed, spreading toward the corners as they open). That occlusion is
+# intended — the policy is expected to move the arm to see what the jaws hide.
+#
+# Placement follows WRIST_CAMERA_MOUNT_SIDE's rule (forward of the servo housing and the
+# wrist_flex joint, so neither is ever in frame) but with 7 cm of standoff along local +y,
+# which at RESTING_ARM_QPOS is world-up. Orientation was not hand-tuned: it is a look-at
+# construction — forward toward (0.42, 0, SURFACE_HEIGHT) on the board, right = forward x
+# world-up, up = right x forward. Deriving right from world-up is what makes the board read
+# level *and* the (horizontal) jaw swing read sideways rather than tilted; earlier attempts
+# tuned roll by hand and traded one against the other.
+#
+# Verified by rendering and inspecting, not by numbers alone: board level, both back ranks
+# and the two far corners in frame, servo housing and wrist_flex out of frame, and jaws that
+# visibly separate left-to-right between fully closed and fully open.
+#
+# Known limit, structural rather than a tuning miss: the jaw's swing direction is ~42 deg off
+# the gripper's lateral axis, tipped along the finger/view axis, so a camera looking out over
+# the fingers always sees part of that motion as approach-in-depth. The jaws therefore track
+# ~38 deg off image-horizontal (still predominantly sideways). A sweep over gripper position,
+# standoff, aim point and fovy bottoms out near 34 deg; only a camera aimed away from the
+# board does better, so this is the floor for a board-reading view.
+WRIST_CAMERA_MOUNT_RESTING_OVER_JAWS: Final = WristCameraMount(
+    pos=(0.0, 0.07, -0.02),
+    xyaxes=(1.0, 0.0, -0.000889, -0.000644, 0.689655, -0.724138),
+    fovy=90.0,
+)
+
+# The over-jaws resting mount is the project's canonical observation view: unless a caller
+# deliberately asks for one of the alternatives above, this is what the policy sees. The other
+# three mounts are kept as comparison baselines, not as live options.
+DEFAULT_WRIST_CAMERA_MOUNT: Final = WRIST_CAMERA_MOUNT_RESTING_OVER_JAWS
 
 ARM_JOINT_NAMES: Final = (
     "shoulder_pan",
@@ -70,6 +204,51 @@ ARM_JOINT_NAMES: Final = (
     "wrist_flex",
     "wrist_roll",
 )
+
+# Resting pose: what the arm holds while the policy reads the board, in ARM_JOINT_NAMES order.
+#
+# The defining constraint is that the jaws' swing plane is parallel to the board, so opening
+# and closing reads as lateral motion from the wrist camera. The jaw hinge axis is the
+# gripper body's local y, so that constraint is exactly "local y is world-vertical" — and
+# because wrist_roll turns about the finger axis (local z), local y can only be brought
+# vertical when the finger axis is horizontal. That makes it a solvable equality, not a
+# trade-off: this pose holds it to 0.0000 deg with shoulder_pan at zero and no joint against
+# a limit, placing the gripper origin at (0.20, 0, 0.16) with the fingers level.
+#
+# An earlier search reported a hard ~32 deg floor on this. That was wrong: it fixed
+# shoulder_lift/elbow_flex/wrist_flex and swept only wrist_roll, so it measured a subspace,
+# not the arm.
+RESTING_ARM_QPOS: Final = (
+    0.0,  # shoulder_pan
+    -0.697406345,  # shoulder_lift
+    1.203682785,  # elbow_flex
+    -0.506276440,  # wrist_flex
+    -1.522116821,  # wrist_roll
+)
+# Birds-eye pose: the survey pose the policy raises to when it needs the whole board, as
+# opposed to RESTING_ARM_QPOS which trades coverage for a manipulation-ready stance. Same arm
+# root, same board, same camera mount — only joint angles differ.
+#
+# The camera ends up 0.30 m over the surface looking down at 88 deg, near enough straight down
+# that the board reads as a flat grid rather than in perspective. All 64 squares fall inside
+# the frame with a 6% margin at the worst corner, and 58 of them are also unoccluded; the
+# gripper's own jaws cover c8, f8, g8, c7, f7 and e6. Compare the resting pose, which has only
+# 40 squares in frame and 27 unoccluded.
+#
+# Found by search, with two constraints that matter more than they look. The horizon is held
+# level by solving for wrist_roll rather than tuning it: with the other four joints fixed, the
+# world z-component of the camera's right axis is `A cos(roll) + B sin(roll) + C`, so level is
+# a closed-form root, and sampling for it instead wastes essentially every draw. And poses
+# within 0.05 rad of any joint limit were rejected — the unconstrained optimum pins wrist_flex
+# against its stop, which leaves the pose no headroom and the actuator sitting on a limit.
+BIRDS_EYE_ARM_QPOS: Final = (
+    0.056699254,  # shoulder_pan
+    -0.980918135,  # shoulder_lift
+    0.160391079,  # elbow_flex
+    1.552324751,  # wrist_flex
+    -1.540697639,  # wrist_roll
+)
+
 GRIPPER_JOINT_NAME: Final = "gripper"
 GRIPPER_SITE_NAME: Final = "gripperframe"
 
@@ -116,6 +295,16 @@ class BoardPose:
     def __post_init__(self) -> None:
         if self.square_pitch <= 0.0:
             raise ValueError(f"square_pitch must be positive, got {self.square_pitch}")
+
+
+# The board placement, and the only one. Everything solved against the board — the reference
+# grasps in `assets/reference_grasps.json` above all — is solved against this pose, so a second
+# "but the grasps were solved at ..." placement must not reappear: poses that hold at one board
+# distance miss by tens of millimetres at another, which is small enough to look right in a
+# render and large enough to grip air.
+DEFAULT_BOARD_POSE: Final = BoardPose(
+    DEFAULT_BOARD_X, DEFAULT_BOARD_Y, DEFAULT_BOARD_YAW, DEFAULT_SQUARE_PITCH
+)
 
 
 def _parse_square(square: str) -> tuple[int, int]:
@@ -172,6 +361,36 @@ class Board:
         return f"{FILES[file_index]}{RANKS[rank_index]}"
 
 
+def apply_resting_pose(model: mujoco.MjModel, data: mujoco.MjData, index: SceneIndex) -> None:
+    """Drive the arm to the scene's resting pose, leaving the pieces where they stand.
+
+    Takes the target from `index.arm_qpos`, so a scene built with a custom pose rests at that
+    pose rather than at the module default. Actuator targets are set alongside the joint
+    angles, so a stepped simulation holds the pose instead of drifting out of it on the first
+    step. Writes the arm's own addresses only; piece and board state are untouched, and `data`
+    is mutated in place.
+
+    Deliberately not routed through the model's qpos0: MuJoCo applies `qpos - qpos0` for hinge
+    joints, so seeding qpos0 with these angles would redefine them as the zero rather than move
+    the arm to them, leaving the joint values correct and the geometry wrong.
+    """
+    for name, value in zip(ARM_JOINT_NAMES, index.arm_qpos, strict=True):
+        data.qpos[model.jnt_qposadr[index.arm_joint_id[name]]] = value
+        data.ctrl[index.arm_actuator_id[name]] = value
+    mujoco.mj_forward(model, data)
+
+
+def make_data(model: mujoco.MjModel, index: SceneIndex) -> mujoco.MjData:
+    """A fresh `MjData` for a built scene, with the arm already at the resting pose.
+
+    Use this rather than `mujoco.MjData(model)` directly: a bare `MjData` starts at the arm's
+    XML home pose, which is not a pose the policy is ever meant to observe from.
+    """
+    data = mujoco.MjData(model)
+    apply_resting_pose(model, data, index)
+    return data
+
+
 def normalize_gripper(qpos: float, joint_range: tuple[float, float]) -> float:
     """Map a raw gripper joint angle (radians) to the `[0, 100]` closed/open convention."""
     lo, hi = joint_range
@@ -188,12 +407,10 @@ def denormalize_gripper(value: float, joint_range: tuple[float, float]) -> float
 class SceneDescription:
     """Everything needed to assemble one MuJoCo scene: board placement and piece layout."""
 
-    board_pose: BoardPose = field(
-        default_factory=lambda: BoardPose(
-            DEFAULT_BOARD_X, DEFAULT_BOARD_Y, DEFAULT_BOARD_YAW, DEFAULT_SQUARE_PITCH
-        )
-    )
+    board_pose: BoardPose = DEFAULT_BOARD_POSE
     pieces: tuple[PiecePlacement, ...] = ()
+    wrist_camera_mount: WristCameraMount = DEFAULT_WRIST_CAMERA_MOUNT
+    arm_qpos: tuple[float, float, float, float, float] = RESTING_ARM_QPOS
 
     def __post_init__(self) -> None:
         squares = [p.square for p in self.pieces]
@@ -217,6 +434,7 @@ class SceneIndex:
     board_body_id: int
     square_geom_id: dict[str, int]
     piece_body_id: dict[str, int]
+    arm_qpos: tuple[float, float, float, float, float]
 
 
 _GEOM_TYPES: Final = {
@@ -380,16 +598,20 @@ def build_scene(desc: SceneDescription) -> tuple[mujoco.MjModel, SceneIndex]:
         _add_piece(worldbody, name, placement, pos)
         piece_body_names[placement.square] = name
 
+    mount = desc.wrist_camera_mount
     gripper_body = spec.body(WRIST_CAMERA_BODY)
     gripper_body.add_camera(
         name=WRIST_CAMERA_NAME,
-        pos=list(WRIST_CAMERA_POS),
-        xyaxes=list(WRIST_CAMERA_XYAXES),
-        fovy=WRIST_CAMERA_FOVY,
+        pos=list(mount.pos),
+        xyaxes=list(mount.xyaxes),
+        fovy=mount.fovy,
     )
 
     model = spec.compile()
-    index = _build_scene_index(model, board, board_pose, square_geom_names, piece_body_names)
+    index = _build_scene_index(
+        model, board, board_pose, square_geom_names, piece_body_names, desc.arm_qpos
+    )
+
     return model, index
 
 
@@ -399,6 +621,7 @@ def _build_scene_index(
     board_pose: BoardPose,
     square_geom_names: dict[str, str],
     piece_body_names: dict[str, str],
+    arm_qpos: tuple[float, float, float, float, float],
 ) -> SceneIndex:
     def body_id(name: str) -> int:
         return int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name))
@@ -433,4 +656,5 @@ def _build_scene_index(
         board_body_id=body_id("board"),
         square_geom_id={sq: geom_id(nm) for sq, nm in square_geom_names.items()},
         piece_body_id={sq: body_id(nm) for sq, nm in piece_body_names.items()},
+        arm_qpos=arm_qpos,
     )

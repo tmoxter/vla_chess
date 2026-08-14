@@ -19,6 +19,13 @@ near the board surface is the authority on that; per the plan's risk register, a
 convergence problem there is treated as a reason to re-tune Step 3/4 reachability bounds, not
 to swap solvers.
 
+**Do not read the verdict below as a grasp count.** It is the loosest possible reading of
+"reachable": any orientation, no collision check, no piece on the square. Under the fingers-down
+constraint an actual grasp needs, with the starting position on the board and the arm required
+to clear itself, 30 of these 64 squares have a usable pose — see `docs/grasp-poses.md`, which is
+the authority on what can be picked up. The gap between the two numbers is not a contradiction;
+it is what this probe deliberately does not model.
+
 **Both of those are still sim-only confirmations.** Every number this probe reports —
 table height, board offset from the arm base, square pitch — is a value chosen in
 simulation with no real SO-101 unit or physical chessboard behind it. This probe (and
@@ -33,7 +40,7 @@ placement and this probe is re-run against those numbers.
 | | |
 |---|---|
 | Centre (x, y) | (0.280, 0.000) m |
-| Yaw | 0.000 rad |
+| Yaw | 1.571 rad |
 | Square pitch | 0.050 m |
 
 ## Per-square verdict
@@ -79,8 +86,8 @@ centre, checked against the base collision proxy's own farthest-corner radius
 
 | | Reachable squares | Clearance |
 |---|---|---|
-| Worst-case pose | 60/64 (pitch 0.050, centre (0.310, -0.030), yaw -0.262 rad) | — |
-| Tightest-clearance | — | 6.2 cm (pitch 0.050, centre (0.250, -0.030), yaw 0.262 rad) |
+| Worst-case pose | 60/64 (pitch 0.050, centre (0.310, -0.030), yaw 1.309 rad) | — |
+| Tightest-clearance | — | 6.2 cm (pitch 0.050, centre (0.250, -0.030), yaw 1.833 rad) |
 
 **Worst case across the envelope: 60/64 reachable, 6.2 cm minimum square-to-base clearance**, against a 60/64 reachability floor and a 10.9 cm clearance floor (8.6 cm base footprint + 1.3 cm piece foot + 1.0 cm margin). This corner violates one or both floors — expected: see the resolution note below, this is not a Step 3 blocker.
 

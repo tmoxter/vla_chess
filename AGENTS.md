@@ -21,3 +21,59 @@ actions between these interfaces.
 - Use mypy, and set type hints everywhere.
 - Use ruff.
 - Set up a pixi pre-commit task running unit tests, type checks, and lints.
+
+## Scene conventions
+
+These are the project's standing assumptions for training and simulation, encoded as the
+defaults in `src/vla_chess/scene.py`. Treat them as the baseline; a scene that departs from
+them is an experiment, not the norm, and should say so at the call site.
+
+- **The arm plays black, from behind the black back rank.** The arm's `base` is pinned at the
+  world origin by the vendored asset, so this is expressed as `DEFAULT_BOARD_YAW = pi/2`
+  rather than by moving the arm.
+- **The wrist camera is the observation.** `DEFAULT_WRIST_CAMERA_MOUNT` is the over-the-jaws
+  resting mount; the other mounts in that module are comparison baselines, not live options.
+- **Scenes start at rest.** Build with `build_scene`, then get state from `make_data` rather
+  than `mujoco.MjData(model)` directly — a bare `MjData` sits at the arm's XML home pose,
+  which the policy should never observe from.
+
+Note that the arm is blind to ranks 6-8 at rest (40/64 squares in frustum) — its own home
+ranks. That is a property of the seat, not a bug, and the policy is expected to move to see
+them.
+
+- **Grasps come in from straight above, and the finger axis is the site's local x.** The TCP
+  site's z axis is the gripper's roll, not its approach: constraining z and calling it
+  "top-down" selects side approaches. Use `grasp.VerticalGraspSolver` (or
+  `grasp.finger_axis_site_frame`) rather than writing a fresh orientation constraint. Reaching
+  the target is the easy half — screen candidate poses for collisions and restart, or the
+  solver will hand back a pose that reaches the square through the arm's own body.
+- **There is exactly one board pose: `scene.DEFAULT_BOARD_POSE` (x = 0.28).** It is what the
+  scene was visually inspected at, and everything solved against the board — the reference
+  grasps above all — is solved against it. Do not re-tune it against a reach or coverage count:
+  a second board distance has already been in this tree once, and reference poses from one
+  distance miss by ~20 mm at another, which looks right in a render and grips air. See
+  `docs/grasp-poses.md`.
+
+### Running `pixi run test-slow`
+
+**Do not run this.** It is not part of CI, not part of `pixi run precommit`, and not part of
+any routine verify-and-commit loop. A commit is green without it. "I changed scene/render code,
+so I should probably check the slow suite" is *not* a sufficient reason — that reflex is what
+this rule exists to stop.
+
+Run it only when one of these is true:
+
+- The user explicitly asks for it by name.
+- A specific slow test is the direct deliverable of the current task (you are writing or fixing
+  that test, and no fast test can express the assertion).
+
+In every other case, rely on `pixi run precommit`. If you believe a change needs slow-suite
+coverage, say so and let the user decide — don't just run it.
+
+When it is genuinely warranted, invoke it on its own: never chained with `&&`/`;`, never
+batched alongside other pixi tasks, never in parallel with another command in the same turn.
+On this host it is slow enough (real MuJoCo + osmesa, 2 vCPUs, no GPU — see
+`docs/render-budget.md`) to regularly exceed a single tool-call timeout, and re-invoking it or
+wrapping it in an outer timeout while a prior run is still in flight is what actually causes
+runs to get killed or orphaned, not the suite itself hanging. Run it, wait for that one
+command to finish, then move on.

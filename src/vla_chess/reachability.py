@@ -307,6 +307,13 @@ near the board surface is the authority on that; per the plan's risk register, a
 convergence problem there is treated as a reason to re-tune Step 3/4 reachability bounds, not
 to swap solvers.
 
+**Do not read the verdict below as a grasp count.** It is the loosest possible reading of
+"reachable": any orientation, no collision check, no piece on the square. Under the fingers-down
+constraint an actual grasp needs, with the starting position on the board and the arm required
+to clear itself, 30 of these 64 squares have a usable pose — see `docs/grasp-poses.md`, which is
+the authority on what can be picked up. The gap between the two numbers is not a contradiction;
+it is what this probe deliberately does not model.
+
 **Both of those are still sim-only confirmations.** Every number this probe reports —
 table height, board offset from the arm base, square pitch — is a value chosen in
 simulation with no real SO-101 unit or physical chessboard behind it. This probe (and

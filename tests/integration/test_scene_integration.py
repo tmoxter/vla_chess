@@ -7,7 +7,11 @@ import pytest
 from vla_chess.render import CameraSpec, Renderer
 from vla_chess.scene import (
     ARM_JOINT_NAMES,
+    RESTING_ARM_QPOS,
     SO101_XML_PATH,
+    WRIST_CAMERA_BODY,
+    WRIST_CAMERA_MOUNT_RESTING_OVER_JAWS,
+    WRIST_CAMERA_NAME,
     Board,
     BoardPose,
     PieceColor,
@@ -174,6 +178,69 @@ class TestPieceSettling:
         up = data.xmat[body_id].reshape(3, 3)[:, 2]
         tilt_deg = float(np.degrees(np.arccos(np.clip(up[2], -1.0, 1.0))))
         assert tilt_deg < 5.0, f"piece settled tilted {tilt_deg:.1f} deg from vertical"
+
+
+class TestRestingPose:
+    """RESTING_ARM_QPOS exists to satisfy one property: the jaws' swing plane is parallel to
+    the board, so opening and closing reads as lateral motion from the wrist camera. These
+    lock that in — the pose numbers are opaque, so a regression would otherwise be invisible
+    until someone looked at a render.
+    """
+
+    def test_swing_plane_is_parallel_to_the_board(self) -> None:
+        model, index = build_scene(SceneDescription())
+        data = mujoco.MjData(model)
+        _set_arm_qpos(
+            model,
+            data,
+            index.arm_joint_id,
+            dict(zip(ARM_JOINT_NAMES, RESTING_ARM_QPOS, strict=True)),
+        )
+        mujoco.mj_forward(model, data)
+
+        gripper_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, WRIST_CAMERA_BODY)
+        # The jaw hinge axis is the gripper body's local y, so the swing plane is parallel to
+        # the (horizontal) board exactly when that axis is world-vertical.
+        hinge_axis = data.xmat[gripper_id].reshape(3, 3)[:, 1]
+        tilt_deg = float(np.degrees(np.arccos(np.clip(abs(hinge_axis[2]), -1.0, 1.0))))
+        assert tilt_deg < 0.5, f"swing plane sits {tilt_deg:.2f} deg off the board plane"
+
+    def test_jaws_separate_sideways_in_the_wrist_camera(self) -> None:
+        desc = SceneDescription(wrist_camera_mount=WRIST_CAMERA_MOUNT_RESTING_OVER_JAWS)
+        model, index = build_scene(desc)
+        data = mujoco.MjData(model)
+        _set_arm_qpos(
+            model,
+            data,
+            index.arm_joint_id,
+            dict(zip(ARM_JOINT_NAMES, RESTING_ARM_QPOS, strict=True)),
+        )
+        camera_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, WRIST_CAMERA_NAME)
+        _, moving_gid = _jaw_geom_ids(model)
+        lo, hi = model.jnt_range[index.gripper_joint_id]
+
+        image_xy = []
+        for value in (lo, hi):
+            data.qpos[model.jnt_qposadr[index.gripper_joint_id]] = value
+            mujoco.mj_forward(model, data)
+            # Camera frame: x right, y up, looking down -z, so -z is the depth in front.
+            offset = data.cam_xmat[camera_id].reshape(3, 3).T @ (
+                data.geom_xpos[moving_gid] - data.cam_xpos[camera_id]
+            )
+            assert offset[2] < 0, "moving jaw is behind the wrist camera at the resting pose"
+            image_xy.append(offset[:2] / -offset[2])
+
+        travel = image_xy[1] - image_xy[0]
+        assert abs(travel[0]) > 0.3, (
+            f"jaw barely moves sideways in frame between closed and open: du={travel[0]:+.3f}"
+        )
+        # Predominantly sideways, not merely non-zero. The floor is not 0 deg: the swing
+        # direction is tipped along the finger/view axis, so part of it always projects as
+        # approach-in-depth (see WRIST_CAMERA_MOUNT_RESTING_OVER_JAWS).
+        assert abs(travel[0]) > abs(travel[1]), (
+            f"jaw travel reads more vertical than horizontal: du={travel[0]:+.3f}, "
+            f"dv={travel[1]:+.3f}"
+        )
 
 
 @pytest.mark.render
