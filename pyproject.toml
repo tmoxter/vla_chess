@@ -49,6 +49,8 @@ reachability-probe = "python -m vla_chess.cli.reachability_probe"
 ik-report = "python -m vla_chess.cli.ik_report"
 solve-reference-grasps = "python -m vla_chess.cli.solve_reference_grasps"
 render-reference-views = "python -m vla_chess.cli.render_reference_views"
+generate-episode = "python -m vla_chess.cli.generate_episode"
+search-survey-pose = "python -m vla_chess.cli.search_survey_pose"
 typecheck = "mypy src"
 lint = "ruff check . && ruff format --check ."
 format = "ruff format ."
@@ -82,7 +84,7 @@ strict_equality = true
 extra_checks = true
 
 [[tool.mypy.overrides]]
-module = ["mujoco", "mujoco.*"]
+module = ["mujoco", "mujoco.*", "scipy", "scipy.*"]
 ignore_missing_imports = true
 
 [tool.ruff]

@@ -47,7 +47,7 @@ expected to move to see them.
   `grasp.finger_axis_site_frame`) rather than writing a fresh orientation constraint. Reaching
   the target is the easy half — screen candidate poses for collisions and restart, or the
   solver will hand back a pose that reaches the square through the arm's own body.
-- **There is exactly one board pose: `scene.DEFAULT_BOARD_POSE` (x = 0.295).** Everything
+- **There is exactly one board pose: `scene.DEFAULT_BOARD_POSE` (x = 0.300).** Everything
   solved against the board — the reference grasps above all — is solved against it, and a
   second board distance has already been in this tree once: reference poses from one distance
   miss by ~20 mm at another, which looks right in a render and grips air. The value sits in a

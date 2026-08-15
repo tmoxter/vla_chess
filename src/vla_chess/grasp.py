@@ -88,9 +88,9 @@ def finger_axis_site_frame(
     """
     mujoco.mj_kinematics(model, data)
     body_id = int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, GRIPPER_BODY_NAME))
-    world = data.site_xpos[index.gripper_site_id] - data.xpos[body_id]
+    world = data.site_xpos[index.tcp_site_id] - data.xpos[body_id]
     world = world / np.linalg.norm(world)
-    rotation = data.site_xmat[index.gripper_site_id].reshape(3, 3)
+    rotation = data.site_xmat[index.tcp_site_id].reshape(3, 3)
     return np.asarray(rotation.T @ world, dtype=np.float64)
 
 
@@ -142,14 +142,14 @@ class VerticalGraspSolver:
 
     def approach_axis(self) -> npt.NDArray[np.float64]:
         """The current world-frame direction the fingers point in."""
-        rotation = self._data.site_xmat[self._index.gripper_site_id].reshape(3, 3)
+        rotation = self._data.site_xmat[self._index.tcp_site_id].reshape(3, 3)
         return np.asarray(rotation @ self._finger_axis, dtype=np.float64)
 
     def _residual(
         self, qpos: npt.NDArray[np.float64], target: npt.NDArray[np.float64], weight: float
     ) -> npt.NDArray[np.float64]:
         self.forward(qpos)
-        position = self._data.site_xpos[self._index.gripper_site_id] - target
+        position = self._data.site_xpos[self._index.tcp_site_id] - target
         return np.concatenate([position, weight * (self.approach_axis() - self._down)])
 
     def _refine(
@@ -183,7 +183,7 @@ class VerticalGraspSolver:
     ) -> tuple[float, float]:
         """TCP distance to `target` (m) and approach angle off vertical (deg) at `qpos`."""
         self.forward(qpos)
-        error = float(np.linalg.norm(self._data.site_xpos[self._index.gripper_site_id] - target))
+        error = float(np.linalg.norm(self._data.site_xpos[self._index.tcp_site_id] - target))
         cosine = float(np.clip(self.approach_axis() @ self._down, -1.0, 1.0))
         return error, float(np.degrees(np.arccos(cosine)))
 
@@ -225,6 +225,21 @@ class VerticalGraspSolver:
             if error <= MAX_TCP_ERROR * 0.1 and angle <= 1.0:
                 break
         return best_qpos, best_error, best_angle
+
+    def track(
+        self,
+        target: npt.NDArray[np.float64],
+        seed: npt.NDArray[np.float64],
+        weight: float = 1.0,
+    ) -> tuple[npt.NDArray[np.float64], float, float]:
+        """Refine one fingers-down configuration from `seed`, with no restarts.
+
+        For following a moving target, where the previous configuration is the seed and a
+        restart would jump to an unrelated solution between one step and the next.
+        """
+        qpos = self._refine(np.asarray(seed, dtype=np.float64), target, weight)
+        error, angle = self.measure(qpos, target)
+        return qpos, error, angle
 
     def solve_square(
         self,

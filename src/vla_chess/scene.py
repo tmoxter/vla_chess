@@ -46,16 +46,18 @@ DARK_SQUARE_RGBA: Final = (0.35, 0.24, 0.16, 1.0)
 #
 # From below, the arm's own body. Rank 8 is the rank nearest the arm, so d8 and e8 sit right in
 # front of the shoulder and the arm has to double back over itself to point the fingers down at
-# them. Below x = 0.293 the only pose that exists for those two grazes the shoulder, and the
-# black queen and king cannot be lifted off their home squares (see docs/grasp-poses.md).
+# them. Below x = 0.298 every pose that reaches those two folds the hand back into the shoulder
+# or the upper arm, and the black queen and king cannot be lifted off their home squares (see
+# docs/grasp-poses.md). That floor moved out from 0.293 when the grasp frame moved to
+# `pinchframe`, which is what closed the old 0.293-0.297 window.
 #
 # From above, the birds-eye survey view. BIRDS_EYE_ARM_QPOS frames all 64 squares from a fixed
-# arm pose, so pushing the board out walks the far corners toward the edge of frame: the corner
-# margin falls from 6% at 0.280 to ~1% here, and past x = 0.297 squares start leaving the frame
-# altogether. That ceiling is a property of that one searched pose, not of the arm — re-solving
-# the birds-eye pose at a new board distance would raise it.
+# arm pose, so pushing the board out walks the far corners toward the edge of frame. That is a
+# property of the searched pose rather than of the arm: the pose committed at 0.295 ran out of
+# frame at 0.297, and re-running the search at 0.300 found one with more margin *and* better
+# visibility than the pose it replaced (`pixi run search-survey-pose`).
 #
-# Between those two bounds, 0.295 is where the scene was inspected by eye and signed off, on
+# Between those two bounds, 0.300 is where the scene was inspected by eye and signed off, on
 # 2026-08-15: the observation views and the back-rank grasps in `docs/reference-views/` are what
 # this board distance looks like, and the framing figures recorded in this module are what those
 # renders measure. `pixi run render-reference-views` regenerates them.
@@ -67,7 +69,7 @@ DARK_SQUARE_RGBA: Final = (0.35, 0.24, 0.16, 1.0)
 # re-derived. Pitch and offset remain unconfirmed guesses (see caveat above), not a measured
 # board's dimensions.
 DEFAULT_SQUARE_PITCH: Final = 0.05
-DEFAULT_BOARD_X: Final = 0.295
+DEFAULT_BOARD_X: Final = 0.300
 DEFAULT_BOARD_Y: Final = 0.0
 
 # The arm plays from behind the black back rank, not from a neutral side seat. The arm's base
@@ -85,6 +87,12 @@ DEFAULT_BOARD_YAW: Final = np.pi / 2
 
 # Playing-surface height (world z where a piece's base rests): the board base's top face
 # plus the square overlay's own half-thickness, both stacked on the tabletop.
+#
+# The square overlays collide. They are decoration to look at, but making them visual-only puts
+# the physical surface 4 mm below this constant, on the board base: pieces then start 4 mm in
+# the air, drop on the first step (overshooting to 5.5 mm mid-bounce) and settle where no
+# grasp was solved for. Every grasp height in this project is measured from here, so the
+# surface the renderer draws and the surface the solver reaches for have to be the same one.
 SURFACE_HEIGHT: Final = TABLE_TOP_Z + 2 * BOARD_BASE_HALF_THICKNESS + SQUARE_HALF_THICKNESS
 
 GRIPPER_BODY_NAME: Final = "gripper"
@@ -116,7 +124,7 @@ class WristCameraMount:
 # Mirrors TheRobotStudio/SO-ARM100's own wrist-cam mounts (see `VENDORED.md` and
 # `Optional/Wrist_Cam_Mount_*` upstream): bolted on above the wrist-roll body, tipped down
 # to look over the fingers at the workspace beyond, rather than straight along the roll
-# axis or into the mechanism. `gripperframe` (the TCP) and the moving jaw both sit ~9-10 cm
+# axis or into the mechanism. `gripperframe` and the moving jaw both sit ~9-10 cm
 # along the body's local -z axis, which is also ~world-up when the arm reaches down at the
 # board — so the camera's "right" axis is the body's local -y (the arm's own lateral
 # direction, stable across reach poses), not local x (the arm's own forward-reach
@@ -244,33 +252,65 @@ RESTING_ARM_QPOS: Final = (
 # opposed to RESTING_ARM_QPOS which trades coverage for a manipulation-ready stance. Same arm
 # root, same board, same camera mount — only joint angles differ.
 #
-# The camera ends up 0.30 m over the surface looking down at 88 deg, near enough straight down
+# The camera ends up 0.28 m over the surface looking down at 83 deg, near enough straight down
 # that the board reads as a flat grid rather than in perspective. All 64 squares fall inside
-# the frame, and 58 of them are also unoccluded; the gripper's own jaws cover c8, f8, g8, c7,
-# f7 and e6. Compare the resting pose, which has 46 squares in frame and 27 unoccluded.
+# the frame with 6.2% of the half-frame to spare at the worst corner, and 60 of them are also
+# unoccluded; the gripper's own jaws cover c7, c8, e7 and f8. Compare the resting pose, which
+# has 46 squares in frame and 27 unoccluded.
 #
-# The margin at the worst corner is only 1% of the half-frame, though, and this pose is the
-# reason DEFAULT_BOARD_X cannot go past ~0.297. It was searched at the earlier 0.280 board
-# distance under a 6% margin floor and kept unchanged when the board moved out, so the margin
-# it has left is whatever survived that move rather than a figure anyone chose. Re-running that
-# search at the current board distance is the fix if the corners ever need headroom.
+# Framing the board is the constraint here, not the objective. Several poses fit all 64 squares
+# and they differ by up to 17 squares in how many the arm's own body then hides, so maximising
+# corner margin alone buys headroom with visibility: the widest-margin pose at this distance
+# reaches +46% by pulling back to 64 deg, and sees 42 squares against this one's 60. What is
+# maximised is squares visible, with the margin held to a 6% floor.
 #
-# Found by search, with two constraints that matter more than they look. The horizon is held
-# level by solving for wrist_roll rather than tuning it: with the other four joints fixed, the
-# world z-component of the camera's right axis is `A cos(roll) + B sin(roll) + C`, so level is
-# a closed-form root, and sampling for it instead wastes essentially every draw. And poses
-# within 0.05 rad of any joint limit were rejected — the unconstrained optimum pins wrist_flex
-# against its stop, which leaves the pose no headroom and the actuator sitting on a limit.
+# Found by search (`pixi run search-survey-pose`), with two constraints that matter more than
+# they look. The horizon is held level by solving for wrist_roll rather than tuning it: with the
+# other four joints fixed, the world z-component of the camera's right axis is
+# `A cos(roll) + B sin(roll) + C`, so level is a closed-form root, and sampling for it instead
+# wastes essentially every draw. Both roots have to be tried — wrist_roll is not the camera's
+# optical axis, so one of the two level solutions swings the camera off the board entirely
+# rather than merely rolling the image, and taking the first root silently searches a space of
+# upward-looking poses. And poses within 0.05 rad of any joint limit were rejected — the
+# unconstrained optimum pins wrist_flex against its stop, which leaves the pose no headroom and
+# the actuator sitting on a limit.
 BIRDS_EYE_ARM_QPOS: Final = (
-    0.056699254,  # shoulder_pan
-    -0.980918135,  # shoulder_lift
-    0.160391079,  # elbow_flex
-    1.552324751,  # wrist_flex
-    -1.540697639,  # wrist_roll
+    0.118154982,  # shoulder_pan
+    -1.219742027,  # shoulder_lift
+    0.319910277,  # elbow_flex
+    1.539854067,  # wrist_flex
+    -1.521454882,  # wrist_roll
 )
 
 GRIPPER_JOINT_NAME: Final = "gripper"
 GRIPPER_SITE_NAME: Final = "gripperframe"
+
+# The gripper closes along the `gripper` body's local x: the fixed finger's face sits at
+# x = -0.0079 and the moving jaw sweeps in from positive x. `gripperframe`, the site the
+# vendored asset ships, sits *on* that face — it is where the two fingers meet when shut, not
+# the centreline between jaws opened wide enough to admit anything. Solving a pose against it
+# therefore parks the fixed finger inside the piece: 12.7 mm deep at the d7 reference grasp,
+# and screened clean, because the contact check exempted the piece being grasped. The vendored
+# site stays in the model and stays untouched; nothing solves against it. See docs/trajectory.md.
+#
+# The pinch site is that frame shifted along +x, far enough to clear the widest stem this piece
+# set presents at grasp height (12 mm, queen and king) with 1.5 mm to spare, so an approach
+# never touches the piece and closure brings it to rest against the fixed finger.
+#
+# The offset is per piece, not one constant for the set, and that was settled by measurement
+# rather than taste. A closing jaw drives the piece against the fixed finger, so whatever
+# distance separates them at approach is distance the piece gets shoved — and a shove applied
+# 25 mm above the board tips a piece at lower force than it slides one. Sized once to the
+# widest stem (12 mm) it left a 9 mm pawn stem 4.5 mm of run-up: the d7 pawn was pushed 17 mm
+# and toppled into the king on e8, aborting the episode on bystander drift. Sized to the piece
+# actually being lifted, the shove is `PINCH_CLEARANCE` and nothing else.
+#
+# The scene therefore carries the offset (`SceneDescription.pinch_offset`) rather than the
+# module: one site, built for the piece that episode moves.
+PINCH_CLEARANCE: Final = 0.0015
+WIDEST_STEM_RADIUS: Final = 0.012
+DEFAULT_PINCH_OFFSET: Final = WIDEST_STEM_RADIUS + PINCH_CLEARANCE
+TCP_SITE_NAME: Final = "pinchframe"
 
 FILES: Final = "abcdefgh"
 RANKS: Final = "12345678"
@@ -411,6 +451,48 @@ def make_data(model: mujoco.MjModel, index: SceneIndex) -> mujoco.MjData:
     return data
 
 
+# Jaw gap as a function of the gripper joint angle, over the openings that admit a chess piece
+# (qpos -0.02 to +0.16, gaps 14-28 mm). Measured off the vendored meshes rather than derived:
+# the jaw face is a printed surface swinging about a hinge, so there is no tidy closed form.
+# Linear to within 0.11 mm across that span, comfortably under the squeeze a grip closes by.
+JAW_GAP_AT_ZERO: Final = 0.01577
+JAW_GAP_PER_RADIAN: Final = 0.07291
+
+# How far past first contact a grip closes. Commanding the mechanical stop instead saturates
+# the servo — ~3.35 N·m over a ~77 mm lever is ~43 N of pinch on a 15 g piece — so the command
+# is sized to the piece and this is the whole of the overlap it asks for.
+GRIP_SQUEEZE: Final = 0.001
+
+
+def stem_radius(piece_type: PieceType, height: float) -> float:
+    """Radius of the geom `piece_type` presents at `height` above its own base."""
+    spanning = [
+        geom
+        for geom in PIECE_GEOMS[piece_type]
+        if geom.shape == "cylinder"
+        and geom.pos[2] - geom.size[1] <= height <= geom.pos[2] + geom.size[1]
+    ]
+    if len(spanning) != 1:
+        raise ValueError(
+            f"{piece_type.value} presents {len(spanning)} cylinders at {height * 1000:.0f} mm, "
+            "so it has no single stem to close on there"
+        )
+    return spanning[0].size[0]
+
+
+def gripper_qpos_for_gap(gap: float) -> float:
+    """Gripper joint angle at which the jaws stand `gap` apart."""
+    return (gap - JAW_GAP_AT_ZERO) / JAW_GAP_PER_RADIAN
+
+
+def grip_command(radius: float, joint_range: tuple[float, float]) -> float:
+    """The `[0, 100]` jaw command that closes on a stem of `radius` with a light squeeze."""
+    return normalize_gripper(
+        gripper_qpos_for_gap(2.0 * radius - GRIP_SQUEEZE),
+        joint_range,
+    )
+
+
 def normalize_gripper(qpos: float, joint_range: tuple[float, float]) -> float:
     """Map a raw gripper joint angle (radians) to the `[0, 100]` closed/open convention."""
     lo, hi = joint_range
@@ -431,6 +513,7 @@ class SceneDescription:
     pieces: tuple[PiecePlacement, ...] = ()
     wrist_camera_mount: WristCameraMount = DEFAULT_WRIST_CAMERA_MOUNT
     arm_qpos: tuple[float, float, float, float, float] = RESTING_ARM_QPOS
+    pinch_offset: float = DEFAULT_PINCH_OFFSET
 
     def __post_init__(self) -> None:
         squares = [p.square for p in self.pieces]
@@ -448,8 +531,9 @@ class SceneIndex:
     arm_joint_id: dict[str, int]
     arm_actuator_id: dict[str, int]
     gripper_joint_id: int
+    gripper_actuator_id: int
     gripper_joint_range: tuple[float, float]
-    gripper_site_id: int
+    tcp_site_id: int
     wrist_camera_id: int
     board_body_id: int
     square_geom_id: dict[str, int]
@@ -550,11 +634,30 @@ def _add_piece(
     return body
 
 
+def _add_pinch_site(spec: mujoco.MjSpec, offset: float) -> None:
+    """Add the pinch site to the gripper body: `gripperframe` shifted along the closing axis.
+
+    Orientation is copied rather than chosen. The grasp solver reads the approach direction off
+    this site's own z axis, so rotating it would silently redefine what fingers-down means.
+    """
+    gripper = spec.body(GRIPPER_BODY_NAME)
+    vendored = next(site for site in gripper.sites if site.name == GRIPPER_SITE_NAME)
+    pos = np.array(vendored.pos, dtype=float)
+    pos[0] += offset
+    gripper.add_site(
+        name=TCP_SITE_NAME,
+        pos=pos.tolist(),
+        quat=np.array(vendored.quat, dtype=float).tolist(),
+        group=int(vendored.group),
+    )
+
+
 def build_scene(desc: SceneDescription) -> tuple[mujoco.MjModel, SceneIndex]:
     """Assemble the arm + table + board + pieces scene described by `desc`."""
     spec = mujoco.MjSpec.from_file(str(SO101_XML_PATH))
     spec.visual.global_.offwidth = RENDER_OFFWIDTH
     spec.visual.global_.offheight = RENDER_OFFHEIGHT
+    _add_pinch_site(spec, desc.pinch_offset)
 
     worldbody = spec.worldbody
     worldbody.add_light(
@@ -606,8 +709,6 @@ def build_scene(desc: SceneDescription) -> tuple[mujoco.MjModel, SceneIndex]:
                     BOARD_BASE_HALF_THICKNESS,
                 ],
                 rgba=list(DARK_SQUARE_RGBA if dark else LIGHT_SQUARE_RGBA),
-                contype=0,
-                conaffinity=0,
             )
             square_geom_names[square] = geom_name
 
@@ -670,8 +771,9 @@ def _build_scene_index(
         arm_joint_id={name: joint_id(name) for name in ARM_JOINT_NAMES},
         arm_actuator_id={name: actuator_id(name) for name in ARM_JOINT_NAMES},
         gripper_joint_id=gripper_joint,
+        gripper_actuator_id=actuator_id(GRIPPER_JOINT_NAME),
         gripper_joint_range=(float(gripper_range[0]), float(gripper_range[1])),
-        gripper_site_id=site_id(GRIPPER_SITE_NAME),
+        tcp_site_id=site_id(TCP_SITE_NAME),
         wrist_camera_id=camera_id(WRIST_CAMERA_NAME),
         board_body_id=body_id("board"),
         square_geom_id={sq: geom_id(nm) for sq, nm in square_geom_names.items()},

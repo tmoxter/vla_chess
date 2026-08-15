@@ -190,7 +190,7 @@ def ik_markdown(measurements: IKMeasurements, config: IKConfig) -> str:
         "## Method",
         "",
         "`kinematics.IKSolver` wraps `mink`'s differential IK: a frame task on the"
-        f" `gripperframe` site (position cost {config.position_cost:g}, orientation cost"
+        f" `pinchframe` site (position cost {config.position_cost:g}, orientation cost"
         f" {config.orientation_cost:g}, Levenberg-Marquardt damping {config.lm_damping:g}), a"
         f" posture task toward the resting pose (cost {config.posture_cost:g}), and a freezing"
         " task holding every dof that is not one of the five arm joints. Joint limits are a"

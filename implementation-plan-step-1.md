@@ -335,7 +335,7 @@ real IK feasibility) for that specific draw, and resamples on failure — the sa
 reject-and-resample pattern the plan already uses for distractor-square collisions and IK
 targets, not a new mechanism. The full pitch/xy/yaw ranges above are kept and only individual
 draws landing in the infeasible corner are rejected; the nominal board pose is whatever the
-grasp constraints in `docs/grasp-poses.md` fix it at (0.295 m as of the reference grasps),
+grasp constraints in `docs/grasp-poses.md` fix it at (0.300 m as of the reference grasps),
 since this sweep has no say in it either way.
 
 **Interface**:

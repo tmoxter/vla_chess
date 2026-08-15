@@ -11,7 +11,7 @@ import mujoco
 import numpy as np
 import numpy.typing as npt
 
-from vla_chess.scene import ARM_JOINT_NAMES, GRIPPER_SITE_NAME, SceneIndex
+from vla_chess.scene import ARM_JOINT_NAMES, TCP_SITE_NAME, SceneIndex
 
 _QP_SOLVER: Final = "daqp"
 _QP_DAMPING: Final = 1e-9
@@ -95,7 +95,7 @@ class IKSolver:
         posture_cost[self._dofadr] = self._cfg.posture_cost
 
         self._frame_task = mink.FrameTask(
-            GRIPPER_SITE_NAME,
+            TCP_SITE_NAME,
             _SITE_FRAME,
             position_cost=self._cfg.position_cost,
             orientation_cost=self._cfg.orientation_cost,
@@ -135,7 +135,7 @@ class IKSolver:
     def fk(self, qpos: npt.ArrayLike) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
         """World position and wxyz quaternion of the gripper site at an arm configuration."""
         self._configuration.update(self._full_qpos(qpos))
-        transform = self._configuration.get_transform_frame_to_world(GRIPPER_SITE_NAME, _SITE_FRAME)
+        transform = self._configuration.get_transform_frame_to_world(TCP_SITE_NAME, _SITE_FRAME)
         position = np.asarray(transform.translation(), dtype=np.float64)
         quaternion = np.asarray(transform.rotation().wxyz, dtype=np.float64)
         return position, quaternion

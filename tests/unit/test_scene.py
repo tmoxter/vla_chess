@@ -1,7 +1,12 @@
 import numpy as np
 import pytest
 
+from vla_chess.grasp import GRASP_HEIGHT
 from vla_chess.scene import (
+    DEFAULT_PINCH_OFFSET,
+    PIECE_GEOMS,
+    PINCH_CLEARANCE,
+    WIDEST_STEM_RADIUS,
     Board,
     BoardPose,
     PieceColor,
@@ -10,6 +15,7 @@ from vla_chess.scene import (
     SceneDescription,
     denormalize_gripper,
     normalize_gripper,
+    stem_radius,
 )
 
 RNG = np.random.default_rng(0)
@@ -138,3 +144,44 @@ class TestSceneDescription:
             )
         )
         assert len(desc.pieces) == 2
+
+
+class TestPinchOffset:
+    """The pinch site has to clear every stem it will be asked to close on."""
+
+    def stems(self) -> dict[PieceType, float]:
+        """Radius of the geom each piece type presents at grasp height."""
+        radii = {}
+        for piece_type, geoms in PIECE_GEOMS.items():
+            spanning = [
+                geom
+                for geom in geoms
+                if geom.shape == "cylinder"
+                and geom.pos[2] - geom.size[1] <= GRASP_HEIGHT <= geom.pos[2] + geom.size[1]
+            ]
+            assert len(spanning) == 1, f"{piece_type} is not a single cylinder at grasp height"
+            radii[piece_type] = spanning[0].size[0]
+        return radii
+
+    def test_every_piece_type_presents_a_stem_at_grasp_height(self) -> None:
+        assert set(self.stems()) == set(PieceType)
+
+    def test_the_widest_stem_constant_matches_the_piece_set(self) -> None:
+        assert max(self.stems().values()) == pytest.approx(WIDEST_STEM_RADIUS)
+
+    # The default has to clear every stem, since it is what a scene gets when the caller does
+    # not say which piece it intends to lift.
+    def test_the_default_offset_clears_every_stem(self) -> None:
+        for piece_type, radius in self.stems().items():
+            assert radius < DEFAULT_PINCH_OFFSET, f"{piece_type.value} stem reaches the pinch site"
+
+    def test_the_default_offset_leaves_the_documented_clearance(self) -> None:
+        assert pytest.approx(PINCH_CLEARANCE) == DEFAULT_PINCH_OFFSET - WIDEST_STEM_RADIUS
+
+    # What the per-piece offset buys: the shove a closing jaw gives the piece is the gap it has
+    # to cross, so sizing the site to the piece caps that at the clearance. Sized once to the
+    # widest stem it was 4.5 mm for a pawn, which toppled it. See scene.PINCH_CLEARANCE.
+    def test_a_per_piece_offset_caps_the_shove_at_the_clearance(self) -> None:
+        for piece_type, radius in self.stems().items():
+            offset = stem_radius(piece_type, GRASP_HEIGHT) + PINCH_CLEARANCE
+            assert offset - radius == pytest.approx(PINCH_CLEARANCE)

@@ -13,6 +13,9 @@ from vla_chess.scene import ARM_JOINT_NAMES, GRIPPER_BODY_NAME, SceneIndex
 
 MOVING_JAW_BODY_NAME: Final = "moving_jaw_so101_v1"
 
+# The vendored asset carries each mesh twice, as a visual geom and a collision one.
+_COLLISION_GROUP: Final = 3
+
 # Contacts shallower than this are treated as touching rather than penetrating: the piece
 # meshes are convex primitive stacks and the arm's collision proxies are coarse, so sub-tenth
 # -millimetre overlaps are quantisation, not interference.
@@ -28,6 +31,18 @@ class Contact:
     robot_body: str
     other_body: str
     depth: float
+
+
+@dataclass(frozen=True)
+class GripContacts:
+    """Which of the two jaws bears on one piece."""
+
+    fixed_finger: bool
+    moving_jaw: bool
+
+    def is_gripped(self) -> bool:
+        """Whether both jaws are on the piece, which is what separates a grip from a nudge."""
+        return self.fixed_finger and self.moving_jaw
 
 
 @dataclass(frozen=True)
@@ -69,6 +84,99 @@ def hand_body_ids(model: mujoco.MjModel) -> frozenset[int]:
         for name in (GRIPPER_BODY_NAME, MOVING_JAW_BODY_NAME)
     ]
     return frozenset(i for i in ids if i >= 0)
+
+
+def _primitive_clearance(
+    points: npt.NDArray[np.float64], geom_type: int, size: npt.NDArray[np.float64]
+) -> npt.NDArray[np.float64]:
+    """Signed distance from `points`, already in the geom's own frame, to one convex primitive."""
+    if geom_type == mujoco.mjtGeom.mjGEOM_SPHERE:
+        return np.asarray(np.linalg.norm(points, axis=1) - size[0], dtype=np.float64)
+    if geom_type == mujoco.mjtGeom.mjGEOM_BOX:
+        outside = np.abs(points) - size[:3]
+        return np.linalg.norm(np.maximum(outside, 0.0), axis=1) + np.minimum(
+            np.max(outside, axis=1), 0.0
+        )
+    if geom_type == mujoco.mjtGeom.mjGEOM_CAPSULE:
+        axial = np.clip(points[:, 2], -size[1], size[1])
+        offset = points - np.stack([np.zeros_like(axial), np.zeros_like(axial), axial], axis=1)
+        return np.asarray(np.linalg.norm(offset, axis=1) - size[0], dtype=np.float64)
+    if geom_type == mujoco.mjtGeom.mjGEOM_CYLINDER:
+        radial = np.linalg.norm(points[:, :2], axis=1) - size[0]
+        axial = np.abs(points[:, 2]) - size[1]
+        corner = np.stack([np.maximum(radial, 0.0), np.maximum(axial, 0.0)], axis=1)
+        return np.asarray(
+            np.linalg.norm(corner, axis=1) + np.minimum(np.maximum(radial, axial), 0.0),
+            dtype=np.float64,
+        )
+    raise ValueError(f"piece geom type {geom_type} is not one of the convex primitives")
+
+
+# MuJoCo collides meshes as convex hulls, and the fixed finger is a forked printed part whose
+# hull fills the fork — precisely the space a gripped piece has to occupy. A hull contact
+# between the hand and the piece it is closing on therefore carries no information: at the d7
+# grasp the hull reports up to 6.7 mm of penetration where the true meshes clear by 4.8 mm.
+# That is why `contacts_at_pose` forgives those contacts, and why forgiving them has to be paid
+# for with a measurement rather than left as an exemption. This is the measurement.
+#
+# Vertices against primitives, not surface against surface: the piece is a stack of convex
+# primitives so its side is exact, while the hand contributes only its mesh vertices. A finger
+# passing through a piece without putting a single vertex inside it would go unseen; at the
+# sub-millimetre vertex spacing of these meshes that needs an interference thinner than the
+# features doing the interfering, which the fork geometry does not offer.
+def piece_clearance(
+    model: mujoco.MjModel, data: mujoco.MjData, piece_body: int, bodies: frozenset[int]
+) -> float:
+    """Smallest true-mesh clearance between `bodies` and one piece. Negative means interference.
+
+    `data` must already carry the pose to test; this runs no kinematics of its own.
+    """
+    piece_geoms = [g for g in range(model.ngeom) if int(model.geom_bodyid[g]) == piece_body]
+    clearance = np.inf
+    for geom in range(model.ngeom):
+        if int(model.geom_bodyid[geom]) not in bodies:
+            continue
+        mesh = int(model.geom_dataid[geom])
+        if mesh < 0 or int(model.geom_group[geom]) != _COLLISION_GROUP:
+            continue
+        start = int(model.mesh_vertadr[mesh])
+        vertices = model.mesh_vert[start : start + int(model.mesh_vertnum[mesh])].astype(np.float64)
+        world = data.geom_xpos[geom] + vertices @ data.geom_xmat[geom].reshape(3, 3).T
+        for piece_geom in piece_geoms:
+            local = (world - data.geom_xpos[piece_geom]) @ data.geom_xmat[piece_geom].reshape(3, 3)
+            distance = _primitive_clearance(
+                local, int(model.geom_type[piece_geom]), model.geom_size[piece_geom]
+            )
+            clearance = min(clearance, float(distance.min()))
+    return clearance
+
+
+def grip_contacts(model: mujoco.MjModel, data: mujoco.MjData, piece_body: int) -> GripContacts:
+    """Which jaws are currently in contact with `piece_body`.
+
+    Reads the contacts already in `data`; the caller decides when the jaws are closed enough
+    for the answer to mean anything. The fixed finger rides on the `gripper` body and so is in
+    contact for reasons that have nothing to do with gripping — it is the moving jaw arriving
+    as well that makes the pair a grip.
+    """
+    fixed = int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, GRIPPER_BODY_NAME))
+    jaw = int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, MOVING_JAW_BODY_NAME))
+    on_fixed = False
+    on_jaw = False
+    for c in range(data.ncon):
+        contact = data.contact[c]
+        first, second = int(model.geom_bodyid[contact.geom1]), int(model.geom_bodyid[contact.geom2])
+        if contact.dist > 0:
+            continue
+        if first == piece_body:
+            other = second
+        elif second == piece_body:
+            other = first
+        else:
+            continue
+        on_fixed = on_fixed or other == fixed
+        on_jaw = on_jaw or other == jaw
+    return GripContacts(fixed_finger=on_fixed, moving_jaw=on_jaw)
 
 
 # A rejection from this module is not proof of a collision. MuJoCo collides meshes as their
@@ -126,11 +234,14 @@ def contacts_at_pose(
     baseline: frozenset[tuple[int, int]] = frozenset(),
     gripper_qpos: float | None = None,
 ) -> PoseContacts:
-    """Penetrating contacts with the arm at `qpos`, ignoring the grasped piece and `baseline`.
+    """Penetrating contacts with the arm at `qpos`, ignoring `baseline`.
 
-    The hand touching the piece named by `grasped_square` is the point of a grasp, so those
-    contacts are excluded; the same piece touched by any other link is not. `data` is mutated
-    in place.
+    Contacts between the hand and the piece named by `grasped_square` are forgiven, because
+    the hand collides as a convex hull that swallows whatever it grips and so reports contact
+    whether or not the geometry actually interferes. That forgiveness is only sound alongside
+    `piece_clearance`, which measures the same pair against the true meshes; screening callers
+    owe both checks. The same piece touched by any other link is not forgiven. `data` is
+    mutated in place.
     """
     qadr = [model.jnt_qposadr[index.arm_joint_id[n]] for n in ARM_JOINT_NAMES]
     data.qpos[qadr] = qpos

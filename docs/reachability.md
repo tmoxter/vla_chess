@@ -39,7 +39,7 @@ placement and this probe is re-run against those numbers.
 
 | | |
 |---|---|
-| Centre (x, y) | (0.295, 0.000) m |
+| Centre (x, y) | (0.300, 0.000) m |
 | Yaw | 1.571 rad |
 | Square pitch | 0.050 m |
 
@@ -56,13 +56,13 @@ Ranks top-to-bottom 8→1, files left-to-right a→h (a white-side view of the b
 | 4 | reach | reach | reach | reach | reach | reach | reach | reach |
 | 3 | reach | reach | reach | reach | reach | reach | reach | reach |
 | 2 | reach | reach | reach | reach | reach | reach | reach | reach |
-| 1 | **miss** | reach | reach | reach | reach | reach | reach | **miss** |
+| 1 | **miss** | **miss** | reach | reach | reach | reach | reach | **miss** |
 
 ## Verdict
 
-**62/64 squares reachable** — meets the 60/64 minimum (implementation-plan-step-1.md §3 acceptance criteria).
+**61/64 squares reachable** — meets the 60/64 minimum (implementation-plan-step-1.md §3 acceptance criteria).
 
-Unreachable squares: a1, h1
+Unreachable squares: a1, b1, h1
 
 ## Randomization envelope (Step 4)
 
@@ -80,16 +80,16 @@ of FK samples landing near every square (reachable) while still placing squares 
 arm base's own physical footprint (no clearance) — the FK sampler has no notion of the
 board's geometry at all, so it cannot catch that case on its own. `min_square_clearance`
 closes that gap: the planar distance from the arm's mount origin to the nearest square
-centre, checked against the base collision proxy's own farthest-corner radius
-(8.6 cm) plus a standing piece's foot radius
+centre, checked against the base collision meshes' own farthest-vertex radius
+(7.2 cm) plus a standing piece's foot radius
 (1.3 cm) plus a 1.0 cm margin.
 
 | | Reachable squares | Clearance |
 |---|---|---|
-| Worst-case pose | 55/64 (pitch 0.050, centre (0.325, -0.030), yaw 1.309 rad) | — |
-| Tightest-clearance | — | 7.7 cm (pitch 0.050, centre (0.265, -0.030), yaw 1.833 rad) |
+| Worst-case pose | 55/64 (pitch 0.050, centre (0.330, -0.030), yaw 1.309 rad) | — |
+| Tightest-clearance | — | 8.2 cm (pitch 0.050, centre (0.270, -0.030), yaw 1.833 rad) |
 
-**Worst case across the envelope: 55/64 reachable, 7.7 cm minimum square-to-base clearance**, against a 60/64 reachability floor and a 10.9 cm clearance floor (8.6 cm base footprint + 1.3 cm piece foot + 1.0 cm margin). This corner violates one or both floors — expected: see the resolution note below, this is not a Step 3 blocker.
+**Worst case across the envelope: 55/64 reachable, 8.2 cm minimum square-to-base clearance**, against a 60/64 reachability floor and a 9.5 cm clearance floor (7.2 cm base footprint + 1.3 cm piece foot + 1.0 cm margin). This corner violates one or both floors — expected: see the resolution note below, this is not a Step 3 blocker.
 
 ### Resolution
 
@@ -99,5 +99,6 @@ versa (see `implementation-plan-step-1.md` §4, "Board pose feasibility"). This 
 by picking a different offset: Step 4's `SpecSampler` checks `min_square_clearance` (and,
 once Step 5 exists, real IK feasibility) against each individual drawn `BoardPose` and
 resamples on failure, the same reject-and-resample pattern already used for distractor-square
-collisions and IK targets elsewhere in the plan. The nominal offset stays 0.28 m and the full
-pitch/xy/yaw ranges are kept; only draws landing in this corner are rejected.
+collisions and IK targets elsewhere in the plan. The nominal offset is set by the grasp
+constraints in `docs/grasp-poses.md` rather than by this sweep, and the full pitch/xy/yaw
+ranges are kept; only draws landing in this corner are rejected.

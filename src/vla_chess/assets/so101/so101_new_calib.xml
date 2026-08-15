@@ -43,11 +43,15 @@
       <geom type="mesh" class="visual" pos="0.0263353 -8.97657e-09 0.0437" quat="1 -2.85511e-16 -9.64433e-17 6.12908e-16" mesh="sts3215_03a_v1" material="sts3215_03a_v1_material"/>
       <!-- Part waveshare_mounting_plate_so101_v2 -->
       <geom type="mesh" class="visual" pos="-0.0309827 -0.000199441 0.0474" quat="0.5 0.5 0.5 0.5" mesh="waveshare_mounting_plate_so101_v2" material="waveshare_mounting_plate_so101_v2_material"/>
-      <!-- Convex collision proxy for the base: upstream ships this body with visual-only
-           meshes and no collision geometry (vla_chess vendoring fix, not part of the
-           original CAD export). Box fitted to the combined mesh AABB of the four visual
-           parts above. -->
-      <geom type="box" class="collision" size="0.048 0.056 0.036" pos="0.017 0 0.034"/>
+      <!-- Collision geometry for the base: upstream ships this body with visual-only meshes
+           and no collision counterpart, unlike every other body in the chain (vla_chess
+           vendoring fix, not part of the original CAD export). Each visual part above is
+           duplicated as a collision geom; see the contact/exclude below, which this needs to
+           be sound. -->
+      <geom type="mesh" class="collision" pos="-0.00636471 -9.94414e-05 -0.0024" quat="0.5 0.5 0.5 0.5" mesh="base_motor_holder_so101_v1" material="base_motor_holder_so101_v1_material"/>
+      <geom type="mesh" class="collision" pos="-0.00636471 -8.97657e-09 -0.0024" quat="0.5 0.5 0.5 0.5" mesh="base_so101_v2" material="base_so101_v2_material"/>
+      <geom type="mesh" class="collision" pos="0.0263353 -8.97657e-09 0.0437" quat="1 -2.85511e-16 -9.64433e-17 6.12908e-16" mesh="sts3215_03a_v1" material="sts3215_03a_v1_material"/>
+      <geom type="mesh" class="collision" pos="-0.0309827 -0.000199441 0.0474" quat="0.5 0.5 0.5 0.5" mesh="waveshare_mounting_plate_so101_v2" material="waveshare_mounting_plate_so101_v2_material"/>
       <!-- Frame baseframe -->
       <site group="3" name="baseframe" pos="8.67362e-19 9.55596e-18 3.46945e-18" quat="1 -8.17396e-19 3.78392e-17 2.22045e-16"/>
       <!-- Link shoulder -->
@@ -130,6 +134,18 @@
       </body>
     </body>
   </worldbody>
+  <!-- vla_chess vendoring fix, not part of the original CAD export. MuJoCo filters
+       parent-child body pairs automatically, but not when the parent is welded to the world
+       - and `base` is bolted down (dofnum 0, weldid 0). So `base` is the one body in this
+       chain whose collision geometry fights its own child: the shoulder pivots inside the
+       base's cavity, and MuJoCo collides meshes as convex hulls, which fill that cavity.
+       Measured without this exclude: base/shoulder overlap in 300 of 300 sampled poses, up
+       to 33.9 mm, saturating `shoulder_pan` at its torque limit in every pose. Every other
+       adjacent pair in the arm gets this filtering for free because its parent has a joint.
+       The joint range already bounds the shoulder mechanically. -->
+  <contact>
+    <exclude body1="base" body2="shoulder"/>
+  </contact>
   <asset>
     <mesh file="waveshare_mounting_plate_so101_v2.stl"/>
     <mesh file="sts3215_03a_v1.stl"/>

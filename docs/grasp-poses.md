@@ -17,29 +17,40 @@ eye: `docs/reference-views.md`.
 
 ## Board placement
 
-Solved at the scene's own board pose, `DEFAULT_BOARD_POSE` (x = 0.295) — there is no separate
+Solved at the scene's own board pose, `DEFAULT_BOARD_POSE` (x = 0.300) — there is no separate
 grasp board distance, and there should not be one again. `--board-x` on the CLI exists for
 exploring alternatives; what it must not do is end up committed as a second source of truth,
 because reference poses solved at one distance land ~20 mm off every square centre at another,
 which is under a piece's foot radius of right and so fails by looking almost correct.
 
-### Why 0.295 and not 0.28
+### Why 0.300 and not 0.28 or 0.295
 
 The board sat at 0.28 while d8 and e8 — the black queen and king on their home squares — had no
 clean fingers-down pose. Rank 8 is the rank *nearest* the arm, so those two sit right in front
-of the shoulder and the arm has to double back over itself to reach them; at 0.28 the single
-pose that exists for each grazes the shoulder. Moving the board out is what resolves it, and the
-distance is squeezed from both sides:
+of the shoulder and the arm has to double back over itself to reach them; every pose that
+reaches them folds the hand back into the shoulder or the upper arm. Moving the board out is
+what resolves it, and the distance is squeezed from both sides:
 
 | board centre x | d8/e8 | birds-eye framing | ranks 6-8 | rank 5 | rank 4 |
 | --- | --- | --- | --- | --- | --- |
-| 0.280 | graze the shoulder | 64/64, 6.0% corner margin | 22/24 | b5-g5 | d4, e4 |
-| 0.290 | still graze | 64/64, 2.7% margin | 22/24 | b5-g5 | d4, e4 |
-| **0.295** | **clean** | **64/64, 1.0% margin** | **24/24** | **b5-g5** | none |
-| 0.300 | clean | 63/64 — a corner leaves frame | 24/24 | b5-g5 | none |
+| 0.285 | both blocked | — | 22/24 | b5-g5 | none |
+| 0.290 | d8 blocked, e8 out of reach | — | 22/24 | b5-g5 | none |
+| 0.295 | both blocked | 64/64, 1.0% margin | 22/24 | b5-g5 | none |
+| **0.300** | **clean** | **64/64, 6.2% margin** | **24/24** | **b5-g5** | none |
+| 0.305 | clean | — | 24/24 | c5-f5 | none |
 
-The floor is ~0.293: below it the graze comes back. The ceiling is ~0.297: above it the
-birds-eye survey pose stops framing the whole board. 0.295 is the middle of that ~4 mm window.
+Total coverage is 28/64 at every distance in that table except 0.300, which is 30/64: the two
+squares gained on rank 8 are gained outright below 0.305, and paid for by b5/g5 above it.
+
+The floor is ~0.298: below it d8/e8 come back blocked. It moved out from ~0.293 when the grasp
+frame moved from `gripperframe` to `pinchframe`, ~9 mm along the closing axis, which is what
+closed the old 0.293-0.297 window and forced the survey pose to be re-searched rather than the
+board to be nudged.
+
+The ceiling is set by the survey pose rather than by the arm, and it moves with that pose: the
+one committed at 0.295 lost a corner at 0.297, and the pose searched at 0.300 has 6.2% of the
+half-frame to spare — more than the 1.0% it replaced — while hiding fewer squares behind the
+arm's own body (60/64 visible against 58/64). See `pixi run search-survey-pose`.
 
 Both bounds were checked across solver seeds, since the near-shoulder squares are exactly where
 a single-shot solve reports a search failure as a reach failure.
@@ -54,15 +65,15 @@ Both directions are pinned in `tests/unit/test_grasp.py::TestReferenceAsset`, th
 `test_the_black_queen_and_king_can_be_lifted_off_their_home_squares` and the cost by
 `test_the_out_of_reach_frontier_is_absent`, so neither can move as a side effect.
 
-The birds-eye ceiling is worth reading as soft: `BIRDS_EYE_ARM_QPOS` was searched at 0.28 under
-a 6% corner-margin floor and left alone when the board moved, so 1.0% is what survived the move
-rather than a chosen figure. Re-running that search at 0.295 would buy back margin and lift the
-ceiling — see the note on that constant in `scene.py`.
+The birds-eye ceiling is soft, and this move is what demonstrated it: `BIRDS_EYE_ARM_QPOS` had
+been searched at 0.28 and left alone when the board moved, so its 1.0% was what survived that
+move rather than a chosen figure. Re-searching it at 0.300 bought the margin back — see the note
+on that constant in `scene.py`.
 
 ### What is not covered
 
-**Ranks 1-4** have no fingers-down solution at any distance tried (at 0.295, rank 4 misses by
-13-57 mm and rank 1 by 146-185 mm), and **a5/h5** miss by 20 mm. A real limit rather than a
+**Ranks 1-4** have no fingers-down solution at any distance tried (at 0.300, rank 4 misses by
+19-62 mm and rank 1 by 157-189 mm), and **a5/h5** miss by 20 mm. A real limit rather than a
 tuning gap: the arm plays black, and capturing on white's half of the board needs a different
 approach angle, not a different board placement.
 
@@ -115,7 +126,7 @@ sampled configuration, but pairs that overlap only in some folded configurations
 reported and may be false. Treat self-collision verdicts near the arm's own body as suspect
 until the collision primitives are checked against the meshes.
 
-At 0.295 nothing in the reference set depends on that: no square is reachable-but-blocked any
+At 0.300 nothing in the reference set depends on that: no square is reachable-but-blocked any
 more, so every pose in the asset is one both the hull model and the true meshes accept, and the
 whole class of false rejection has been designed out rather than argued around. It matters
 again the moment the board moves back in, or a new approach angle puts the gripper near the

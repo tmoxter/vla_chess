@@ -1,7 +1,5 @@
 import argparse
-import struct
 import sys
-import zlib
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
@@ -12,6 +10,7 @@ import numpy.typing as npt
 
 from vla_chess.cli.solve_reference_grasps import starting_position
 from vla_chess.grasp import load_reference_grasps
+from vla_chess.imaging import caption, write_png
 from vla_chess.render import CameraSpec, FreeCameraPose, Renderer
 from vla_chess.scene import (
     ARM_JOINT_NAMES,
@@ -39,70 +38,6 @@ GRASP_CAMERAS: Final = (
     ("front", (0.66, 0.0, 0.30), (0.16, 0.0, 0.16)),
     ("top", (0.18, -0.02, 0.80), (0.18, 0.0, 0.10)),
 )
-
-# 5x7 bitmap glyphs, drawn at 2x, covering only the characters the captions use. A caption
-# burned into the image is what keeps a reference render self-identifying once it is out of
-# this repo and in a chat window.
-_GLYPHS: Final = {
-    "0": ("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
-    "1": ("00100", "01100", "00100", "00100", "00100", "00100", "01110"),
-    "2": ("01110", "10001", "00001", "00010", "00100", "01000", "11111"),
-    "3": ("11111", "00010", "00100", "00010", "00001", "10001", "01110"),
-    "4": ("00010", "00110", "01010", "10010", "11111", "00010", "00010"),
-    "5": ("11111", "10000", "11110", "00001", "00001", "10001", "01110"),
-    "6": ("00110", "01000", "10000", "11110", "10001", "10001", "01110"),
-    "7": ("11111", "00001", "00010", "00100", "01000", "01000", "01000"),
-    "8": ("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
-    "9": ("01110", "10001", "10001", "01111", "00001", "00010", "01100"),
-    "a": ("00000", "00000", "01110", "00001", "01111", "10001", "01111"),
-    "b": ("10000", "10000", "10110", "11001", "10001", "10001", "11110"),
-    "c": ("00000", "00000", "01110", "10001", "10000", "10001", "01110"),
-    "d": ("00001", "00001", "01101", "10011", "10001", "10001", "01111"),
-    "e": ("00000", "00000", "01110", "10001", "11111", "10000", "01110"),
-    "g": ("00000", "00000", "01111", "10001", "01111", "00001", "01110"),
-    "i": ("00100", "00000", "01100", "00100", "00100", "00100", "01110"),
-    "n": ("00000", "00000", "10110", "11001", "10001", "10001", "10001"),
-    "r": ("00000", "00000", "10110", "11001", "10000", "10000", "10000"),
-    "s": ("00000", "00000", "01111", "10000", "01110", "00001", "11110"),
-    "t": ("01000", "01000", "11110", "01000", "01000", "01001", "00110"),
-    "x": ("00000", "00000", "10001", "01010", "00100", "01010", "10001"),
-    "y": ("00000", "00000", "10001", "10001", "01111", "00001", "01110"),
-    "-": ("00000", "00000", "00000", "11111", "00000", "00000", "00000"),
-    ".": ("00000", "00000", "00000", "00000", "00000", "01100", "01100"),
-    "=": ("00000", "00000", "11111", "00000", "11111", "00000", "00000"),
-    " ": ("00000",) * 7,
-}
-
-
-def write_png(path: Path, image: npt.NDArray[np.uint8]) -> None:
-    """Write an (h, w, 3) uint8 array as an RGB PNG, using only the standard library."""
-    height, width, _ = image.shape
-    raw = b"".join(b"\x00" + image[y].tobytes() for y in range(height))
-
-    def chunk(tag: bytes, payload: bytes) -> bytes:
-        body = tag + payload
-        return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body))
-
-    path.write_bytes(
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
-        + chunk(b"IDAT", zlib.compress(raw, 6))
-        + chunk(b"IEND", b"")
-    )
-
-
-def caption(width: int, text: str, height: int = 22) -> npt.NDArray[np.uint8]:
-    """A black strip carrying `text` in white, to sit above a row of panels."""
-    bar = np.zeros((height, width, 3), dtype=np.uint8)
-    x = 4
-    for character in text:
-        glyph = _GLYPHS.get(character, _GLYPHS[" "])
-        for row, bits in enumerate(glyph):
-            for column, bit in enumerate(bits):
-                if bit == "1":
-                    bar[6 + row * 2 : 8 + row * 2, x + column * 2 : x + column * 2 + 2] = 255
-        x += 12
-    return bar
 
 
 def _apply(

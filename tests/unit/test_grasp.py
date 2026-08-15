@@ -83,16 +83,16 @@ class TestReferenceAsset:
     ) -> None:
         # d8 and e8 are the squares the board distance is set by. They sit directly in front of
         # the shoulder, so the arm doubles back over itself to point the fingers down at them,
-        # and the single pose that exists for each only clears the shoulder because the board
-        # was moved out to 0.295; nearer than ~0.293 it grazes. Pinned because it is
+        # and the poses that exist for them only clear the shoulder because the board was moved
+        # out to 0.300; nearer than ~0.298 every solution folds into it. Pinned because it is
         # load-bearing for move planning and because it would go quietly: nothing else fails
         # when the queen and king become unliftable.
         assert {"d8", "e8"} <= set(grasps)
 
     def test_the_out_of_reach_frontier_is_absent(self, grasps: dict[str, GraspPose]) -> None:
         # The cost side of that board distance, pinned so it stays a decision. a5/h5 miss by
-        # 20 mm and d4/e4 by 13 mm fingers-down; d4 and e4 were reachable before the board
-        # moved out. If these come back, the board moved.
+        # 21 mm and d4/e4 by 19 mm fingers-down; d4 and e4 were reachable at 0.28, before the
+        # board moved out. If these come back, the board moved.
         assert OUT_OF_REACH_FRONTIER.isdisjoint(grasps)
 
     def test_unreachable_squares_are_absent_rather_than_recorded(self) -> None:

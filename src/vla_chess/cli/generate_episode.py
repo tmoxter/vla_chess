@@ -1,0 +1,233 @@
+import argparse
+import json
+import subprocess
+import sys
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Final
+
+import numpy as np
+
+from vla_chess.cli.solve_reference_grasps import starting_position
+from vla_chess.executor import CONTROL_HZ, Executor
+from vla_chess.grasp import GRASP_HEIGHT, VerticalGraspSolver
+from vla_chess.imaging import contact_sheet, downscale, write_png
+from vla_chess.observe import DEFAULT_FPS, Frame, ObservationRecorder, image_is_sane
+from vla_chess.planner import MoveSpec, plan_move, total_duration
+from vla_chess.render import CameraSpec, Renderer
+from vla_chess.scene import (
+    BIRDS_EYE_ARM_QPOS,
+    DEFAULT_BOARD_POSE,
+    PINCH_CLEARANCE,
+    RENDER_OFFHEIGHT,
+    RENDER_OFFWIDTH,
+    WRIST_CAMERA_NAME,
+    SceneDescription,
+    build_scene,
+    make_data,
+    stem_radius,
+)
+
+DEFAULT_OUTPUT_DIR: Final = Path("docs/episode-views")
+SHEET_COLUMNS: Final = 4
+SHEET_PANELS: Final = 12
+SHEET_DOWNSCALE: Final = 2
+
+
+def sheet(frames: Sequence[Frame], panels: int, columns: int) -> np.ndarray:
+    """A contact sheet of `panels` frames spread evenly across an episode."""
+    picks = np.unique(np.linspace(0, len(frames) - 1, num=min(panels, len(frames))).round()).astype(
+        int
+    )
+    tiles = [
+        (
+            f"{frames[i].phase.value} t={frames[i].timestamp:.2f}",
+            downscale(frames[i].images[WRIST_CAMERA_NAME], SHEET_DOWNSCALE),
+        )
+        for i in picks
+    ]
+    return contact_sheet(tiles, columns)
+
+
+def write_video(path: Path, frames: Sequence[Frame], fps: float) -> bool:
+    """Encode the wrist camera's frames to mp4 with ffmpeg. False if ffmpeg is unavailable."""
+    first = frames[0].images[WRIST_CAMERA_NAME]
+    height, width, _ = first.shape
+    command = [
+        "ffmpeg",
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-s",
+        f"{width}x{height}",
+        "-r",
+        f"{fps}",
+        "-i",
+        "-",
+        "-an",
+        "-vcodec",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        str(path),
+    ]
+    try:
+        process = subprocess.run(
+            command,
+            input=b"".join(frame.images[WRIST_CAMERA_NAME].tobytes() for frame in frames),
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
+    if process.returncode != 0:
+        print(process.stderr.decode(errors="replace")[-2000:], file=sys.stderr)
+        return False
+    return True
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse the single-episode generator's command line."""
+    parser = argparse.ArgumentParser(
+        prog="generate-episode",
+        description="Plan, execute and record one pick-and-place episode, and write the wrist "
+        "camera's view of it out for inspection.",
+    )
+    parser.add_argument("--source", default="d7")
+    parser.add_argument("--target", default="d6")
+    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--fps", type=float, default=DEFAULT_FPS)
+    parser.add_argument("--control-hz", type=float, default=CONTROL_HZ)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--no-video", action="store_true")
+    parser.add_argument(
+        "--frames-dir",
+        type=Path,
+        default=None,
+        help="also write every captured frame as its own PNG, for frame-by-frame inspection",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Generate one episode and write its views, metadata and verdict."""
+    args = parse_args(argv)
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+
+    pieces = starting_position()
+    occupant = {placement.square: placement.piece_type for placement in pieces}
+    if args.source not in occupant:
+        print(f"no piece on {args.source} to move", file=sys.stderr)
+        return 1
+    piece_type = occupant[args.source]
+
+    # The pinch site is built for the piece this episode lifts: the gap between the fixed
+    # finger and the piece at approach is the distance the closing jaw shoves it.
+    description = SceneDescription(
+        board_pose=DEFAULT_BOARD_POSE,
+        pieces=pieces,
+        arm_qpos=BIRDS_EYE_ARM_QPOS,
+        pinch_offset=stem_radius(piece_type, GRASP_HEIGHT) + PINCH_CLEARANCE,
+    )
+    model, index = build_scene(description)
+
+    spec = MoveSpec(source=args.source, target=args.target, piece_type=piece_type)
+    plan_data = make_data(model, index)
+    solver = VerticalGraspSolver(model, plan_data, index)
+    print(f"solving anchor poses for {spec.source} -> {spec.target}", flush=True)
+    plan = plan_move(spec, model, plan_data, index, solver, np.random.default_rng(args.seed))
+    print(
+        f"planned {len(plan.waypoints)} waypoints, "
+        f"{total_duration(plan.waypoints):.1f} s: {' '.join(p.value for p in plan.phases())}",
+        flush=True,
+    )
+
+    data = make_data(model, index)
+    executor = Executor(model, index, control_hz=args.control_hz)
+    with Renderer(
+        model, [CameraSpec(WRIST_CAMERA_NAME, RENDER_OFFWIDTH, RENDER_OFFHEIGHT)]
+    ) as renderer:
+        recorder = ObservationRecorder(renderer, fps=args.fps, control_hz=args.control_hz)
+        print("executing", flush=True)
+        result = executor.run(data, plan, on_control_step=recorder.on_control_step)
+        frames = recorder.frames(result)
+
+    print(
+        f"{result.diagnostics.control_steps} control steps in "
+        f"{result.diagnostics.wall_seconds:.1f} s, {len(frames)} frames captured",
+        flush=True,
+    )
+    print(
+        f"grasped={result.grasped} placed={result.placed} final_square={result.final_square} "
+        f"abort={result.abort_reason.value if result.abort_reason else None}",
+        flush=True,
+    )
+    print(
+        f"max tracking error {result.diagnostics.max_tracking_error:.4f} rad, "
+        f"max IK error {result.diagnostics.max_ik_error * 1000:.2f} mm",
+        flush=True,
+    )
+
+    insane = [
+        frame.frame_index for frame in frames if not image_is_sane(frame.images[WRIST_CAMERA_NAME])
+    ]
+    if insane:
+        print(f"frames failing the image sanity check: {insane}", flush=True)
+
+    if frames:
+        sheet_path = args.out_dir / f"episode-{spec.source}-{spec.target}.png"
+        write_png(sheet_path, sheet(frames, SHEET_PANELS, SHEET_COLUMNS))
+        print(f"wrote {sheet_path}", flush=True)
+
+        if not args.no_video:
+            video_path = args.out_dir / f"episode-{spec.source}-{spec.target}.mp4"
+            if write_video(video_path, frames, args.fps):
+                print(f"wrote {video_path}", flush=True)
+            else:
+                print("ffmpeg unavailable or failed; skipped the video", flush=True)
+
+        if args.frames_dir is not None:
+            args.frames_dir.mkdir(parents=True, exist_ok=True)
+            for frame in frames:
+                write_png(
+                    args.frames_dir / f"{frame.frame_index:04d}.png",
+                    frame.images[WRIST_CAMERA_NAME],
+                )
+            print(f"wrote {len(frames)} frames to {args.frames_dir}", flush=True)
+
+    metadata = {
+        "instruction": plan.instruction,
+        "source": spec.source,
+        "target": spec.target,
+        "board_pose": {"x": DEFAULT_BOARD_POSE.x, "yaw": DEFAULT_BOARD_POSE.yaw},
+        "hover_height": spec.hover_height,
+        "grasp_height": spec.grasp_height,
+        "control_hz": args.control_hz,
+        "fps": args.fps,
+        "seed": args.seed,
+        "frames": len(frames),
+        "grasped": result.grasped,
+        "placed": result.placed,
+        "final_square": result.final_square,
+        "abort_reason": result.abort_reason.value if result.abort_reason else None,
+        "phase_boundaries": {
+            phase.value: list(span) for phase, span in result.phase_boundaries.items()
+        },
+        "diagnostics": {
+            "max_tracking_error": result.diagnostics.max_tracking_error,
+            "max_ik_error": result.diagnostics.max_ik_error,
+            "control_steps": result.diagnostics.control_steps,
+            "sim_steps": result.diagnostics.sim_steps,
+            "wall_seconds": result.diagnostics.wall_seconds,
+        },
+    }
+    metadata_path = args.out_dir / f"episode-{spec.source}-{spec.target}.json"
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+    print(f"wrote {metadata_path}", flush=True)
+    return 0 if result.succeeded else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

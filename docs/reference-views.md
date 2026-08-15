@@ -20,11 +20,11 @@ the point of committing them.
 
 The wrist camera — the policy's whole observation — at the resting pose (left) and the birds-eye
 survey pose (right), one row per board distance. The committed image compares the retired 0.280
-placement against the current 0.295 one.
+placement against the current 0.300 one.
 
-What it is for: judging framing by eye. In particular the birds-eye row is where the cost of the
-current placement shows — all 64 squares are in frame but the worst corner clears the edge by
-only 1.0%, against 6.0% at 0.280 (see `grasp-poses.md`).
+What it is for: judging framing by eye. The birds-eye row is where the placement and the survey
+pose are judged together: all 64 squares are in frame with 6.2% of the half-frame to spare at
+the worst corner, against 6.0% at 0.280 and 1.0% at the retired 0.295 (see `grasp-poses.md`).
 
 ## `back-rank-grasps.png`
 
@@ -37,7 +37,9 @@ double back over itself to point the fingers down at them; c8 is the neighbourin
 was already accepted, so it is the control — d8 and e8 should read as the same kind of
 configuration, not as something more exotic.
 
-Signed off at x = 0.295 on 2026-08-15, together with the placement itself.
+Signed off at x = 0.295 on 2026-08-15, together with the placement itself. **Re-rendered at
+x = 0.300 on 2026-08-15 with a re-searched survey pose and awaiting a fresh sign-off** — the
+placement changed because the grasp frame moved, so the previous sign-off does not carry over.
 
 ## Scope
 

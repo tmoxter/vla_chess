@@ -25,10 +25,13 @@ DEFAULT_XY_TOLERANCE: Final = 0.02
 DEFAULT_Z_BAND: Final = (-0.01, 0.12)
 MIN_REACHABLE_SQUARES: Final = 60
 
-# Arm base collision proxy (scene.py): box size=[0.048, 0.056, 0.036] at local pos
-# [0.017, 0, 0.034], base body at world origin. Farthest corner from the origin, i.e. the
-# largest radius a piece standing anywhere on the board could still clip the base.
-BASE_FOOTPRINT_RADIUS: Final = 0.086
+# Arm base collision geometry (so101_new_calib.xml): the four visual parts duplicated as
+# mesh collision geoms, base body at world origin. Largest planar distance from that origin
+# to any vertex of those meshes, i.e. the largest radius a piece standing anywhere on the
+# board could still clip the base. Driven by `base_so101_v2`; measured, not estimated, and
+# it is a convex-hull bound because MuJoCo collides meshes as hulls. Re-measure this if the
+# base's collision geoms ever change.
+BASE_FOOTPRINT_RADIUS: Final = 0.0718
 SAFETY_MARGIN: Final = 0.01
 MIN_SQUARE_CLEARANCE: Final = BASE_FOOTPRINT_RADIUS + PIECE_FOOT_RADIUS + SAFETY_MARGIN
 
@@ -60,7 +63,7 @@ def sample_tcp_positions(
         for qadr, value in zip(qadrs, samples[i], strict=True):
             data.qpos[qadr] = value
         mujoco.mj_forward(model, data)
-        positions[i] = data.site_xpos[index.gripper_site_id]
+        positions[i] = data.site_xpos[index.tcp_site_id]
     return positions
 
 
@@ -239,7 +242,7 @@ of FK samples landing near every square (reachable) while still placing squares 
 arm base's own physical footprint (no clearance) — the FK sampler has no notion of the
 board's geometry at all, so it cannot catch that case on its own. `min_square_clearance`
 closes that gap: the planar distance from the arm's mount origin to the nearest square
-centre, checked against the base collision proxy's own farthest-corner radius
+centre, checked against the base collision meshes' own farthest-vertex radius
 ({BASE_FOOTPRINT_RADIUS * 100:.1f} cm) plus a standing piece's foot radius
 ({PIECE_FOOT_RADIUS * 100:.1f} cm) plus a {SAFETY_MARGIN * 100:.1f} cm margin.
 

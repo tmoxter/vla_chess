@@ -1,0 +1,44 @@
+{
+  "abort_reason": "piece_disturbed",
+  "board_pose": {
+    "x": 0.295,
+    "yaw": 1.5707963267948966
+  },
+  "control_hz": 50.0,
+  "diagnostics": {
+    "control_steps": 265,
+    "max_ik_error": 6.658888314031005e-07,
+    "max_tracking_error": 0.1345331993876331,
+    "sim_steps": 2650,
+    "wall_seconds": 165.38187318202108
+  },
+  "final_square": "d7",
+  "fps": 10.0,
+  "frames": 53,
+  "grasp_height": 0.025,
+  "grasped": false,
+  "hover_height": 0.065,
+  "instruction": "move the pawn from d7 to d6",
+  "phase_boundaries": {
+    "approach": [
+      50,
+      174
+    ],
+    "descend": [
+      175,
+      249
+    ],
+    "grasp": [
+      250,
+      264
+    ],
+    "survey_start": [
+      0,
+      49
+    ]
+  },
+  "placed": false,
+  "seed": 0,
+  "source": "d7",
+  "target": "d6"
+}
