@@ -12,50 +12,74 @@ Regenerate with:
 pixi run solve-reference-grasps
 ```
 
-Verify (slow suite): `pytest -m slow tests/integration/test_grasp_integration.py`.
+Verify (slow suite): `pytest -m slow tests/integration/test_grasp_integration.py`. Inspect by
+eye: `docs/reference-views.md`.
 
 ## Board placement
 
-Solved at the scene's own board pose, `DEFAULT_BOARD_POSE` (x = 0.28) — there is no separate
-grasp board distance, and there should not be one again. An earlier revision of this file
-argued for 0.30 on the strength of the sweep below:
+Solved at the scene's own board pose, `DEFAULT_BOARD_POSE` (x = 0.295) — there is no separate
+grasp board distance, and there should not be one again. `--board-x` on the CLI exists for
+exploring alternatives; what it must not do is end up committed as a second source of truth,
+because reference poses solved at one distance land ~20 mm off every square centre at another,
+which is under a piece's foot radius of right and so fails by looking almost correct.
 
-| board centre x | clean squares (ranks 5-8) | what runs out |
-| --- | --- | --- |
-| 0.28 | 27/32 | c8/d8/e8 self-collide — the arm folds too tightly |
-| 0.30 | 30/32 | only a5/h5 |
-| 0.32 | 28/32 | a5/b5/g5/h5 |
-| 0.34 | 24/32 | most of rank 5 |
-| 0.42 | 10/32 | ranks 5 and 6 both out of reach |
+### Why 0.295 and not 0.28
 
-That argument was retired for two reasons. The decisive one is that 0.28 is the placement the
-scene was **inspected at** — the resting and birds-eye framings, and every coverage figure
-recorded with them, reproduce at 0.28 and nowhere else — and a square-count delta is not
-grounds to move a pose that was signed off by eye. The second is that the two-squares-better
-claim did not survive contact: solving at 0.28 with the collision screen now in the solver
-yields **30 clean squares**, the same as 0.30, because c8's failure was a search failure rather
-than a reach limit (the first random restart finds a clean pose; the old sweep only ever tried
-one). Keeping a second board distance bought nothing and cost correctness — reference poses
-solved at 0.30 land 20 mm off every square centre on a default scene, which is under a piece's
-foot radius of right and so fails by looking almost correct.
+The board sat at 0.28 while d8 and e8 — the black queen and king on their home squares — had no
+clean fingers-down pose. Rank 8 is the rank *nearest* the arm, so those two sit right in front
+of the shoulder and the arm has to double back over itself to reach them; at 0.28 the single
+pose that exists for each grazes the shoulder. Moving the board out is what resolves it, and the
+distance is squeezed from both sides:
 
-`--board-x` on the CLI still exists for exploring alternatives; what it must not do is end up
-committed as a second source of truth.
+| board centre x | d8/e8 | birds-eye framing | ranks 6-8 | rank 5 | rank 4 |
+| --- | --- | --- | --- | --- | --- |
+| 0.280 | graze the shoulder | 64/64, 6.0% corner margin | 22/24 | b5-g5 | d4, e4 |
+| 0.290 | still graze | 64/64, 2.7% margin | 22/24 | b5-g5 | d4, e4 |
+| **0.295** | **clean** | **64/64, 1.0% margin** | **24/24** | **b5-g5** | none |
+| 0.300 | clean | 63/64 — a corner leaves frame | 24/24 | b5-g5 | none |
+
+The floor is ~0.293: below it the graze comes back. The ceiling is ~0.297: above it the
+birds-eye survey pose stops framing the whole board. 0.295 is the middle of that ~4 mm window.
+
+Both bounds were checked across solver seeds, since the near-shoulder squares are exactly where
+a single-shot solve reports a search failure as a reach failure.
+
+The cost is **d4 and e4**, which were reachable at 0.28 and now miss by 13 mm. That is a real
+loss but a cheap one: ranks 1-4 were already almost entirely out of reach, so d4/e4 were two
+isolated squares in a half of the board the arm cannot play from anyway, traded for the two
+squares its own queen and king stand on. Ranks 6-8 — everything playing black's opening needs —
+go from 22/24 to complete. Total coverage is 30/64 either way.
+
+Both directions are pinned in `tests/unit/test_grasp.py::TestReferenceAsset`, the gain by
+`test_the_black_queen_and_king_can_be_lifted_off_their_home_squares` and the cost by
+`test_the_out_of_reach_frontier_is_absent`, so neither can move as a side effect.
+
+The birds-eye ceiling is worth reading as soft: `BIRDS_EYE_ARM_QPOS` was searched at 0.28 under
+a 6% corner-margin floor and left alone when the board moved, so 1.0% is what survived the move
+rather than a chosen figure. Re-running that search at 0.295 would buy back margin and lift the
+ceiling — see the note on that constant in `scene.py`.
 
 ### What is not covered
 
-**d8 and e8** are reachable fingers-down but have no collision-free solution at all: they sit
-directly in front of the shoulder, and a 60-restart search finds ~186 in-tolerance poses for
-each, every one of which folds the arm through its own body. This is load-bearing — the black
-queen and king cannot be lifted off their home squares by this approach — and is pinned by
-`tests/unit/test_grasp.py::TestReferenceAsset::test_the_two_blocked_home_squares_are_still_blocked`.
-It wants either a non-vertical approach for those two squares or a different board placement,
-and the latter is not free (see above).
+**Ranks 1-4** have no fingers-down solution at any distance tried (at 0.295, rank 4 misses by
+13-57 mm and rank 1 by 146-185 mm), and **a5/h5** miss by 20 mm. A real limit rather than a
+tuning gap: the arm plays black, and capturing on white's half of the board needs a different
+approach angle, not a different board placement.
 
-**Ranks 1-4** have no fingers-down solution at any distance in the sweep (rank 4 misses by
-17-61 mm, rank 1 by 157-184 mm). Also a real limit rather than a tuning gap: the arm plays
-black, and capturing on white's half of the board needs a different approach angle or a
-different board placement.
+**Before trusting any future self-collision rejection, run the exact-mesh check.** MuJoCo
+collides meshes as their convex hulls, and these are C-shaped printed parts whose hulls fill the
+cavity — measured, the hull inflates the shoulder bracket 3.9x and the gripper 2.6x by volume.
+On the old d8 pose it reported 12.7 mm of penetration where the true triangle meshes were within
+~0.1 mm of each other. The hull is conservative, so it never misses a real collision, but it
+rejects freely: it is what made c8 look blocked for a whole revision of this document, and it is
+why "d8 and e8 are impossible" survived here longer than it should have. A hull rejection means
+*look closer*, not *impossible*.
+
+One thing that check settled and that still holds: for a square in front of the shoulder there
+is exactly **one** fingers-down solution, not a family. 150 random restarts returned 77
+in-tolerance poses collapsing to one distinct configuration — three position constraints plus
+two approach-axis constraints against five joints is a square system, so solutions are isolated.
+Any claim of the form "N solutions were tried and all failed" is one solution tried N times.
 
 ## Why the earlier 0.42 recommendation was wrong
 
@@ -88,12 +112,14 @@ The vendored asset declares no exclude pairs and its collision proxies overlap w
 links do not — `base` and `shoulder` interpenetrate by 38 mm in *every* configuration,
 including the resting pose. `collision.baseline_self_pairs` filters pairs that overlap in every
 sampled configuration, but pairs that overlap only in some folded configurations still get
-reported and may be false. Treat self-collision verdicts near the arm's own body — the d8/e8
-exclusion above, whose contacts are `shoulder`/`upper_arm` against the gripper at depths of
-5-17 mm — as suspect until the collision primitives are checked against the meshes. The
-exclusion is the conservative direction (two squares withheld that might be usable), so it is
-safe to ship, but it should not be treated as settled: if the proxies turn out to be too fat,
-d8 and e8 may come back.
+reported and may be false. Treat self-collision verdicts near the arm's own body as suspect
+until the collision primitives are checked against the meshes.
+
+At 0.295 nothing in the reference set depends on that: no square is reachable-but-blocked any
+more, so every pose in the asset is one both the hull model and the true meshes accept, and the
+whole class of false rejection has been designed out rather than argued around. It matters
+again the moment the board moves back in, or a new approach angle puts the gripper near the
+shoulder.
 
 ## Scope
 

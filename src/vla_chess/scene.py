@@ -41,18 +41,33 @@ BOARD_BASE_RGBA: Final = (0.30, 0.20, 0.14, 1.0)
 LIGHT_SQUARE_RGBA: Final = (0.92, 0.88, 0.78, 1.0)
 DARK_SQUARE_RGBA: Final = (0.35, 0.24, 0.16, 1.0)
 
-# This offset was first suggested by a coarse geometric reachability probe (see
-# docs/reachability.md), but what settled it is that the scene was inspected by eye at this
-# placement and signed off: the resting and birds-eye views below, and the framing claims
-# recorded with them, are all what this board distance looks like through the wrist camera.
+# This offset is not a tuning parameter with a smooth optimum: it is pinned between two
+# constraints that close on it from opposite sides, and the gap between them is ~3 mm wide.
 #
-# So do not re-tune this against a reach count. Square-coverage numbers move by a few squares
-# between nearby offsets and will happily argue for a placement nobody has ever looked at,
-# which is how a second board distance got into the tree once already. If it moves, the views
-# have to be re-inspected and every board-dependent figure in this module re-derived. Pitch and
-# offset remain unconfirmed guesses (see caveat above), not a measured board's dimensions.
+# From below, the arm's own body. Rank 8 is the rank nearest the arm, so d8 and e8 sit right in
+# front of the shoulder and the arm has to double back over itself to point the fingers down at
+# them. Below x = 0.293 the only pose that exists for those two grazes the shoulder, and the
+# black queen and king cannot be lifted off their home squares (see docs/grasp-poses.md).
+#
+# From above, the birds-eye survey view. BIRDS_EYE_ARM_QPOS frames all 64 squares from a fixed
+# arm pose, so pushing the board out walks the far corners toward the edge of frame: the corner
+# margin falls from 6% at 0.280 to ~1% here, and past x = 0.297 squares start leaving the frame
+# altogether. That ceiling is a property of that one searched pose, not of the arm — re-solving
+# the birds-eye pose at a new board distance would raise it.
+#
+# Between those two bounds, 0.295 is where the scene was inspected by eye and signed off, on
+# 2026-08-15: the observation views and the back-rank grasps in `docs/reference-views/` are what
+# this board distance looks like, and the framing figures recorded in this module are what those
+# renders measure. `pixi run render-reference-views` regenerates them.
+#
+# What does *not* justify moving this is a reach or coverage count. Square-coverage numbers move
+# by a few squares between nearby offsets and will happily argue for a placement nobody has ever
+# looked at, which is how a second board distance got into the tree once already. If it moves,
+# the views have to be re-inspected by eye and every board-dependent figure in this module
+# re-derived. Pitch and offset remain unconfirmed guesses (see caveat above), not a measured
+# board's dimensions.
 DEFAULT_SQUARE_PITCH: Final = 0.05
-DEFAULT_BOARD_X: Final = 0.28
+DEFAULT_BOARD_X: Final = 0.295
 DEFAULT_BOARD_Y: Final = 0.0
 
 # The arm plays from behind the black back rank, not from a neutral side seat. The arm's base
@@ -231,9 +246,14 @@ RESTING_ARM_QPOS: Final = (
 #
 # The camera ends up 0.30 m over the surface looking down at 88 deg, near enough straight down
 # that the board reads as a flat grid rather than in perspective. All 64 squares fall inside
-# the frame with a 6% margin at the worst corner, and 58 of them are also unoccluded; the
-# gripper's own jaws cover c8, f8, g8, c7, f7 and e6. Compare the resting pose, which has only
-# 40 squares in frame and 27 unoccluded.
+# the frame, and 58 of them are also unoccluded; the gripper's own jaws cover c8, f8, g8, c7,
+# f7 and e6. Compare the resting pose, which has 46 squares in frame and 27 unoccluded.
+#
+# The margin at the worst corner is only 1% of the half-frame, though, and this pose is the
+# reason DEFAULT_BOARD_X cannot go past ~0.297. It was searched at the earlier 0.280 board
+# distance under a 6% margin floor and kept unchanged when the board moved out, so the margin
+# it has left is whatever survived that move rather than a figure anyone chose. Re-running that
+# search at the current board distance is the fix if the corners ever need headroom.
 #
 # Found by search, with two constraints that matter more than they look. The horizon is held
 # level by solving for wrist_roll rather than tuning it: with the other four joints fixed, the

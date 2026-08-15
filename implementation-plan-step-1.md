@@ -333,8 +333,10 @@ architectural: `SpecSampler.sample` draws pitch/xy/yaw per episode as already pl
 the drawn `BoardPose` against `reachability.min_square_clearance` (and, once Step 5 exists,
 real IK feasibility) for that specific draw, and resamples on failure — the same
 reject-and-resample pattern the plan already uses for distractor-square collisions and IK
-targets, not a new mechanism. The nominal board pose stays at 0.28 m and the full pitch/xy/yaw
-ranges above are kept; only individual draws landing in the infeasible corner are rejected.
+targets, not a new mechanism. The full pitch/xy/yaw ranges above are kept and only individual
+draws landing in the infeasible corner are rejected; the nominal board pose is whatever the
+grasp constraints in `docs/grasp-poses.md` fix it at (0.295 m as of the reference grasps),
+since this sweep has no say in it either way.
 
 **Interface**:
 ```python
@@ -1099,7 +1101,7 @@ insurance against discovering a corrupt dataset after a multi-day run.
 | Vendored SO-101 MJCF fails Step 3 acceptance (base collisions, gripper joint fix, compile/reachability) | Step 3 blocked | Hard stop. Fix the asset (patch collisions/joint mapping, or escalate upstream) before proceeding — no silent substitution. |
 | `mink` IK fails to converge near the board surface | Step 5 convergence < 98% | Treated as a scene/reachability problem (target range, joint limits), not a solver swap — tune task weights and Step 3/4 reachability bounds first. |
 | Board/table placement geometry (table height, board offset from the arm base, square pitch) is a simulation-only guess with no real SO-101 unit or physical chessboard behind it | Step 3's "64/64 reachable" and Step 5's IK convergence rate are both only self-consistency checks against that guessed geometry, not confirmation against hardware | Not resolved by any amount of additional simulation, including a clean Step 5 IK pass. Stays open until an actual SO-101 mount height and board placement are measured and `pixi run reachability-probe` is re-run against those numbers. |
-| No single nominal board offset is simultaneously reachable and clear-of-self-collision across the full Step 4 pitch×xy×yaw randomization envelope | `docs/reachability.md` envelope section: at 0.28 m worst-corner clearance is 6.2 cm vs 10.9 cm required; at 0.34 m (chosen to fix that) worst-corner reachability drops to 47/64 | **Resolved, not open**: this was never solvable by picking a better offset (the two requirements pull in opposite directions on the same axis) — Step 4's `SpecSampler` checks `min_square_clearance` per drawn spec and resamples on failure instead, per §4 "Board pose feasibility". Nominal offset stays 0.28 m; full ranges are kept. |
+| No single nominal board offset is simultaneously reachable and clear-of-self-collision across the full Step 4 pitch×xy×yaw randomization envelope | `docs/reachability.md` envelope section: at 0.28 m worst-corner clearance is 6.2 cm vs 10.9 cm required; at 0.34 m (chosen to fix that) worst-corner reachability drops to 47/64 | **Resolved, not open**: this was never solvable by picking a better offset (the two requirements pull in opposite directions on the same axis) — Step 4's `SpecSampler` checks `min_square_clearance` per drawn spec and resamples on failure instead, per §4 "Board pose feasibility". Nominal offset is set by the grasp constraints instead (`docs/grasp-poses.md`); full ranges are kept. |
 | Grasping is unreliable (pieces slip) | Step 7/15a success rate < 85% | Tune gripper friction/geometry, grasp height, and closure force; widen piece geometry tolerance; these are scene parameters, not code changes. |
 | Diversity criteria fail despite randomization | Step 6/14 diversity checks red | Ranges are config; widen and re-run the cheap Stage A dry-run to confirm before regenerating. |
 | RAM ceiling hit during long runs | RSS guard trips | Frames stream to the writer; model reuse audited in Step 10; guard exits cleanly and the run resumes. |

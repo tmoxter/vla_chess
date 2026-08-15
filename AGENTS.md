@@ -37,9 +37,9 @@ them is an experiment, not the norm, and should say so at the call site.
   than `mujoco.MjData(model)` directly — a bare `MjData` sits at the arm's XML home pose,
   which the policy should never observe from.
 
-Note that the arm is blind to ranks 6-8 at rest (40/64 squares in frustum) — its own home
-ranks. That is a property of the seat, not a bug, and the policy is expected to move to see
-them.
+Note that the arm is blind to ranks 7-8 and the a6/h6 corners at rest (46/64 squares in
+frustum) — its own home ranks. That is a property of the seat, not a bug, and the policy is
+expected to move to see them.
 
 - **Grasps come in from straight above, and the finger axis is the site's local x.** The TCP
   site's z axis is the gripper's roll, not its approach: constraining z and calling it
@@ -47,12 +47,15 @@ them.
   `grasp.finger_axis_site_frame`) rather than writing a fresh orientation constraint. Reaching
   the target is the easy half — screen candidate poses for collisions and restart, or the
   solver will hand back a pose that reaches the square through the arm's own body.
-- **There is exactly one board pose: `scene.DEFAULT_BOARD_POSE` (x = 0.28).** It is what the
-  scene was visually inspected at, and everything solved against the board — the reference
-  grasps above all — is solved against it. Do not re-tune it against a reach or coverage count:
-  a second board distance has already been in this tree once, and reference poses from one
-  distance miss by ~20 mm at another, which looks right in a render and grips air. See
-  `docs/grasp-poses.md`.
+- **There is exactly one board pose: `scene.DEFAULT_BOARD_POSE` (x = 0.295).** Everything
+  solved against the board — the reference grasps above all — is solved against it, and a
+  second board distance has already been in this tree once: reference poses from one distance
+  miss by ~20 mm at another, which looks right in a render and grips air. The value sits in a
+  ~4 mm window with a hard constraint on each side (d8/e8 self-collision below it, birds-eye
+  framing above it), so do not re-tune it against a reach or coverage count. It was signed off
+  by eye, and `pixi run render-reference-views` regenerates exactly what was looked at — if the
+  pose ever moves, re-inspect those and get the new ones signed off too. See
+  `docs/grasp-poses.md` and `docs/reference-views.md`.
 
 ### Running `pixi run test-slow`
 

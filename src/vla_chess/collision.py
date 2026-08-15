@@ -71,6 +71,13 @@ def hand_body_ids(model: mujoco.MjModel) -> frozenset[int]:
     return frozenset(i for i in ids if i >= 0)
 
 
+# A rejection from this module is not proof of a collision. MuJoCo collides meshes as their
+# convex hulls, and the arm's links are C-shaped printed parts whose hulls fill the cavity —
+# measured, the shoulder bracket's hull is 3.9x its mesh volume and the gripper's 2.6x. On a
+# folded pose that has been seen to report 12.7 mm of penetration where the true triangle meshes
+# clear each other by ~0.1 mm. Treat a self-collision verdict as "look closer" rather than
+# "impossible", and check the exact meshes before recording a square as ungraspable; see
+# docs/grasp-poses.md. Contacts far from the arm's own body do not have this problem.
 def baseline_self_pairs(
     model: mujoco.MjModel,
     data: mujoco.MjData,

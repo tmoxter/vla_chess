@@ -258,8 +258,9 @@ versa (see `implementation-plan-step-1.md` §4, "Board pose feasibility"). This 
 by picking a different offset: Step 4's `SpecSampler` checks `min_square_clearance` (and,
 once Step 5 exists, real IK feasibility) against each individual drawn `BoardPose` and
 resamples on failure, the same reject-and-resample pattern already used for distractor-square
-collisions and IK targets elsewhere in the plan. The nominal offset stays 0.28 m and the full
-pitch/xy/yaw ranges are kept; only draws landing in this corner are rejected.
+collisions and IK targets elsewhere in the plan. The nominal offset is set by the grasp
+constraints in `docs/grasp-poses.md` rather than by this sweep, and the full pitch/xy/yaw
+ranges are kept; only draws landing in this corner are rejected.
 """
 
 

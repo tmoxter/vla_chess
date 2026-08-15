@@ -14,9 +14,9 @@ from vla_chess.grasp import (
 )
 from vla_chess.scene import ARM_JOINT_NAMES, DEFAULT_BOARD_POSE
 
-# Squares the arm can reach fingers-down but never without colliding with itself; see
-# docs/grasp-poses.md.
-BLOCKED_HOME_SQUARES = {"d8", "e8"}
+# The nearest squares the arm cannot reach fingers-down, so the frontier is pinned from the
+# far side as well as the near one; see docs/grasp-poses.md.
+OUT_OF_REACH_FRONTIER = {"a5", "h5", "d4", "e4"}
 
 
 @pytest.fixture(scope="module")
@@ -73,19 +73,27 @@ class TestReferenceAsset:
 
     def test_black_home_and_opening_ranks_are_covered(self, grasps: dict[str, GraspPose]) -> None:
         # Ranks 6-8 are what playing black's opening needs: pick up from 7-8, put down on 6.
+        # All 24 of them, with no exception carved out — d8 and e8 are in here on purpose (see
+        # the next test), and an exception list creeping back is the regression to catch.
         needed = {f"{file}{rank}" for file in "abcdefgh" for rank in "678"}
-        assert needed - BLOCKED_HOME_SQUARES <= set(grasps)
+        assert needed <= set(grasps)
 
-    def test_the_two_blocked_home_squares_are_still_blocked(
+    def test_the_black_queen_and_king_can_be_lifted_off_their_home_squares(
         self, grasps: dict[str, GraspPose]
     ) -> None:
-        # d8 and e8 sit directly in front of the shoulder, and every fingers-down solution for
-        # them folds the arm through its own body — not a solver budget problem: a 60-restart
-        # search found 186 in-tolerance poses for each and no clean one. Pinned here because
-        # the gap is load-bearing for move planning (the black queen and king cannot be lifted
-        # off their home squares this way) and because it is exactly the kind of thing that
-        # gets quietly reintroduced by a solver change that stops screening collisions.
-        assert BLOCKED_HOME_SQUARES.isdisjoint(grasps)
+        # d8 and e8 are the squares the board distance is set by. They sit directly in front of
+        # the shoulder, so the arm doubles back over itself to point the fingers down at them,
+        # and the single pose that exists for each only clears the shoulder because the board
+        # was moved out to 0.295; nearer than ~0.293 it grazes. Pinned because it is
+        # load-bearing for move planning and because it would go quietly: nothing else fails
+        # when the queen and king become unliftable.
+        assert {"d8", "e8"} <= set(grasps)
+
+    def test_the_out_of_reach_frontier_is_absent(self, grasps: dict[str, GraspPose]) -> None:
+        # The cost side of that board distance, pinned so it stays a decision. a5/h5 miss by
+        # 20 mm and d4/e4 by 13 mm fingers-down; d4 and e4 were reachable before the board
+        # moved out. If these come back, the board moved.
+        assert OUT_OF_REACH_FRONTIER.isdisjoint(grasps)
 
     def test_unreachable_squares_are_absent_rather_than_recorded(self) -> None:
         payload = json.loads(REFERENCE_GRASPS_PATH.read_text())
