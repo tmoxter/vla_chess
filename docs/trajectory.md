@@ -409,5 +409,53 @@ to the gripper, so that free roll lands directly in the observation: in
 `docs/episode-views/episode-d7-d6.png` the board's horizon swings through roughly 45 degrees
 across the manipulation phases. Two runs of the same move can differ in image orientation
 without differing in what the arm did, which is noise aimed at exactly the phases where
-precision matters. Pinning roll — as a preference in the grasp solver, or as an extra residual —
-is a decision this step surfaces but does not make.
+precision matters.
+
+### The transit paid for it in a quarter-turn of nothing
+
+Watching `e7 -> e6`, the wrist spins most of a full turn before the descent. Measured on the
+plan, in degrees:
+
+| | pan | lift | elbow | flex | roll |
+|---|---|---|---|---|---|
+| survey pose | 6.77 | −69.89 | 18.33 | 88.23 | **−87.17** |
+| approach anchor, unpicked | −10.51 | −26.73 | 22.78 | 94.47 | **+162.79** |
+| approach anchor, picked | −10.48 | −27.28 | 23.21 | 93.54 | **−11.46** |
+
+The anchor the solver first returned asks for **+249.96 degrees** of roll, and the arm cannot
+take the short way round instead: `wrist_roll` runs `[−157.21, +162.79]` and does not wrap, so
+the −110-degree route leaves the joint 40 degrees past its stop. The pose is also *on* the
+stop — +162.79 is the limit exactly.
+
+Neither is forced. Solving the same `e7` hover from 40 seeds, every accepted pose falls into one
+of three families, and the other four joints agree to half a degree across all of them:
+
+| roll | seeds | roll travel from the survey pose |
+|---|---|---|
+| −11.4 | 23 | 75.7 deg |
+| −157.2, on the stop | 7 | 70.0 deg |
+| +162.8, on the stop | 10 | 249.9 deg |
+
+They differ in nothing but which way round the hand is, because roll is the direction the
+residual leaves free. Which one comes back was decided by whichever restart converged first.
+
+`solve` now takes `prefer`, a configuration the arm is coming from, and returns the acceptable
+pose nearest to it (`travel_cost`): stops sorted behind free poses, then the widest single joint
+turn, then the total. The widest turn leads because a leg is given a fixed duration — that joint
+sets the speed the whole leg has to run at. `plan_move` picks the source anchor toward the
+survey pose and the target anchor toward the source's, which are the configurations the legs
+into them actually start from.
+
+The margin is measured on `wrist_roll` alone. Measuring it on every joint ranks *every* solution
+clamped and hands the choice back to travel: a fingers-down pose over the arm's home ranks holds
+`wrist_flex` within 0.5-1.5 degrees of its stop whatever the roll does, which is geometry rather
+than a choice. Roll is the one joint whose value the solver picks.
+
+On `e7 -> e6` the transit's roll falls from 249.96 to 75.71 degrees, twice — once out and once
+back — and the anchor comes off the stop with 145 degrees to spare. The episode still places the
+piece (`grasped`, `placed`, ends on `e6`, no aborts), and maximum tracking error over it drops
+from 0.0082 to 0.0045 rad: the actuator is no longer holding a joint against its own limit.
+
+What this does not do is pin roll to a value. Two episodes of different moves still frame the
+board differently, and a move whose nearest anchor is a half-turn from the survey pose still
+turns a half-turn. It removes the rotation that buys nothing, not the variation itself.

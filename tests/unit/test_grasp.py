@@ -1,18 +1,44 @@
 import json
 
+import mujoco
+import numpy as np
 import pytest
 
 from vla_chess.grasp import (
     GRASP_HEIGHT,
     MAX_APPROACH_DEG,
     MAX_TCP_ERROR,
+    MIN_LIMIT_MARGIN,
     REFERENCE_BOARD_POSE,
     REFERENCE_GRASPS_PATH,
     GraspPose,
+    VerticalGraspSolver,
+    joint_limits,
     load_reference_grasps,
     reference_metadata,
 )
-from vla_chess.scene import ARM_JOINT_NAMES, DEFAULT_BOARD_POSE
+from vla_chess.planner import ArmQpos
+from vla_chess.scene import (
+    ARM_JOINT_NAMES,
+    BIRDS_EYE_ARM_QPOS,
+    DEFAULT_BOARD_POSE,
+    PieceColor,
+    PiecePlacement,
+    PieceType,
+    SceneDescription,
+    SceneIndex,
+    build_scene,
+    grip_radius,
+    make_data,
+    pinch_offset_for,
+)
+
+# A square with room around it, so the poses these tests compare differ in roll and in nothing
+# else.
+PREFERENCE_SQUARE = "e7"
+
+# A configuration to measure travel from, chosen so the arithmetic in a cost is readable.
+ORIGIN = np.zeros(5)
 
 # The nearest squares the arm cannot reach fingers-down, so the frontier is pinned from the
 # far side as well as the near one; see docs/grasp-poses.md.
@@ -98,3 +124,104 @@ class TestReferenceAsset:
     def test_unreachable_squares_are_absent_rather_than_recorded(self) -> None:
         payload = json.loads(REFERENCE_GRASPS_PATH.read_text())
         assert "a1" not in payload["grasps"]
+
+
+Scene = tuple[VerticalGraspSolver, mujoco.MjModel, SceneIndex]
+
+
+@pytest.fixture(scope="module")
+def solver_scene() -> Scene:
+    radius = grip_radius(PieceType.PAWN, GRASP_HEIGHT)
+    desc = SceneDescription(
+        pieces=(PiecePlacement(PREFERENCE_SQUARE, PieceType.PAWN, PieceColor.BLACK),),
+        pinch_offset=pinch_offset_for(radius),
+    )
+    model, index = build_scene(desc)
+    data = make_data(model, index)
+    return VerticalGraspSolver(model, data, index), model, index
+
+
+def rolls_over(
+    solver: VerticalGraspSolver, index: SceneIndex, seeds: range, prefer: ArmQpos | None
+) -> list[GraspPose]:
+    return [
+        solver.solve_square(
+            PREFERENCE_SQUARE,
+            index.board,
+            index.board_pose,
+            np.random.default_rng(seed),
+            prefer=prefer,
+        )
+        for seed in seeds
+    ]
+
+
+class TestFreeMargin:
+    def test_a_pose_on_the_roll_stop_has_no_margin(self, solver_scene: Scene) -> None:
+        solver, model, index = solver_scene
+        lo, _ = joint_limits(model, index)
+        assert solver.free_margin(lo) == pytest.approx(0.0)
+
+    def test_a_pose_away_from_the_roll_stops_has_margin(self, solver_scene: Scene) -> None:
+        solver, _, _ = solver_scene
+        assert solver.free_margin(np.zeros(len(ARM_JOINT_NAMES))) > MIN_LIMIT_MARGIN
+
+    def test_the_other_joints_do_not_count_against_a_pose(self, solver_scene: Scene) -> None:
+        # A fingers-down pose over the arm's home ranks holds wrist_flex within 1.5 degrees of
+        # its stop whatever the roll does, so counting every joint would rank every solution
+        # clamped and leave the choice to travel alone — which is the roll stop again.
+        solver, model, index = solver_scene
+        _, hi = joint_limits(model, index)
+        flexed = np.zeros(len(ARM_JOINT_NAMES))
+        flexed[ARM_JOINT_NAMES.index("wrist_flex")] = hi[ARM_JOINT_NAMES.index("wrist_flex")]
+        assert solver.free_margin(flexed) > MIN_LIMIT_MARGIN
+
+
+class TestTravelCost:
+    """How two solutions that reach the square equally well are ranked against each other."""
+
+    def test_the_nearer_pose_ranks_first(self, solver_scene: Scene) -> None:
+        solver, _, _ = solver_scene
+        near = np.array([0.0, 0.0, 0.0, 0.0, np.radians(-11.0)])
+        far = np.array([0.0, 0.0, 0.0, 0.0, np.radians(120.0)])
+        assert solver.travel_cost(near, ORIGIN) < solver.travel_cost(far, ORIGIN)
+
+    def test_the_widest_single_turn_decides_before_the_total(self, solver_scene: Scene) -> None:
+        # Four joints turning a little are cheaper than one turning a lot, even when they add up
+        # to more: it is the widest turn that sets how fast a fixed-duration leg has to move.
+        solver, _, _ = solver_scene
+        spread = np.array([0.3, 0.3, 0.3, 0.3, 0.3])
+        single = np.array([0.0, 0.0, 0.0, 0.0, 0.5])
+        assert solver.travel_cost(spread, ORIGIN) < solver.travel_cost(single, ORIGIN)
+
+    def test_a_clamped_pose_ranks_behind_a_further_free_one(self, solver_scene: Scene) -> None:
+        solver, model, index = solver_scene
+        lo, _ = joint_limits(model, index)
+        clamped = np.array([0.0, 0.0, 0.0, 0.0, lo[ARM_JOINT_NAMES.index("wrist_roll")]])
+        free = np.array([0.0, 0.0, 0.0, 0.0, np.radians(150.0)])
+        assert solver.travel_cost(clamped, ORIGIN) > solver.travel_cost(free, ORIGIN)
+
+
+class TestPreferredSolutions:
+    """The fingers-down constraint leaves roll free, so which solution comes back is a choice."""
+
+    def test_a_preferred_solve_still_reaches_the_square(self, solver_scene: Scene) -> None:
+        solver, _, index = solver_scene
+        for pose in rolls_over(solver, index, range(3), BIRDS_EYE_ARM_QPOS):
+            assert pose.is_within_tolerance()
+
+    def test_a_preference_settles_which_solution_comes_back(self, solver_scene: Scene) -> None:
+        # Without one the roll is whatever the first accepted restart converged on, which is a
+        # different quarter-turn from one seed to the next; with one it is the same pose every
+        # time, because every seed searches the same continuum for the same nearest point.
+        solver, _, index = solver_scene
+        preferred = rolls_over(solver, index, range(4), BIRDS_EYE_ARM_QPOS)
+        rolls = [pose.qpos[ARM_JOINT_NAMES.index("wrist_roll")] for pose in preferred]
+        assert max(rolls) - min(rolls) < np.radians(1.0)
+
+    def test_the_preferred_solution_keeps_off_the_stops(self, solver_scene: Scene) -> None:
+        # The two nearest solutions to the survey pose are a degree of travel apart and one of
+        # them is clamped on the roll stop, so nearness alone would pick the clamped one.
+        solver, _, index = solver_scene
+        for pose in rolls_over(solver, index, range(3), BIRDS_EYE_ARM_QPOS):
+            assert solver.free_margin(np.asarray(pose.qpos)) >= MIN_LIMIT_MARGIN

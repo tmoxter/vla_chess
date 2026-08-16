@@ -47,6 +47,15 @@ expected to move to see them.
   `grasp.finger_axis_site_frame`) rather than writing a fresh orientation constraint. Reaching
   the target is the easy half — screen candidate poses for collisions and restart, or the
   solver will hand back a pose that reaches the square through the arm's own body.
+- **A square has a continuum of grasps, so say which one you want.** The residual leaves
+  `wrist_roll` free: every solution reaches the square equally well and they sit a half-turn
+  apart, so taking the first acceptable one is a coin toss that a transit then pays for in
+  wrist rotation — 250 degrees of it on the episode that surfaced this. Pass `prefer` (the
+  configuration the arm is coming from) to `solve`/`solve_square` anywhere a pose is solved for
+  an arm that is already somewhere, and it returns the nearest acceptable pose that is not
+  sitting on the roll stop. Judge a pose's headroom with `free_margin`, on roll alone: the other
+  four joints are pinned by the target, and `wrist_flex` is within 1.5 degrees of its stop in
+  every fingers-down pose over the home ranks. See `docs/trajectory.md`.
 - **The hand is collided as slabs of its own meshes, and the two have to stay in step.** MuJoCo
   collides a mesh as one convex hull, and the fixed finger is an L whose hull fills the mouth a
   gripped piece occupies: the drawn finger stood 10.6 mm clear of a pawn the engine was holding,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -57,6 +57,15 @@ _IK_RESTARTS: Final = 6
 # cheap enough (a few seconds each) to be worth paying for a correct verdict.
 _IK_SCREENED_RESTARTS: Final = 60
 _FD_EPS: Final = 1e-6
+
+# How far the roll joint should stay off its own limit. A pose on a stop is one the actuator
+# holds by pushing into the stop, with nothing left over for the tracking error the executor
+# reports, and the restarts land there often: clipping a random seed's surplus roll costs the
+# residual nothing, because roll is the direction the fingers-down constraint leaves free. It is
+# a preference rather than a bound — a square whose only solution is clamped still gets one.
+MIN_LIMIT_MARGIN: Final = np.radians(2.0)
+
+_ROLL: Final = ARM_JOINT_NAMES.index("wrist_roll")
 
 
 @dataclass(frozen=True)
@@ -178,6 +187,31 @@ class VerticalGraspSolver:
             previous = current
         return qpos
 
+    def free_margin(self, qpos: npt.NDArray[np.float64]) -> float:
+        """How far the roll joint stands off its own limit, in radians.
+
+        Only that joint: it is the one the residual leaves free, so where it sits is the
+        solver's choice and every value it takes has a neighbour a degree away that grasps the
+        square just as well. The other four are pinned by the target, and near a stop is often
+        the only place they can be — at a fingers-down pose over the arm's home ranks wrist_flex
+        runs within 1.5 degrees of its limit whatever else is done.
+        """
+        roll = float(np.asarray(qpos, dtype=np.float64)[_ROLL])
+        return min(roll - float(self._lo[_ROLL]), float(self._hi[_ROLL]) - roll)
+
+    def travel_cost(
+        self, qpos: npt.NDArray[np.float64], prefer: npt.NDArray[np.float64]
+    ) -> tuple[int, float, float]:
+        """Rank of one solved pose against the configuration the arm is coming from.
+
+        Poses on the roll stop sort behind poses off it, then the joint that turns furthest
+        decides, then the total. The widest single turn leads because a leg is given a fixed
+        duration: it is that joint that sets how fast the arm has to move to hold the schedule.
+        """
+        delta = np.abs(qpos - prefer)
+        clamped = int(self.free_margin(qpos) < MIN_LIMIT_MARGIN)
+        return clamped, float(delta.max()), float(delta.sum())
+
     def measure(
         self, qpos: npt.NDArray[np.float64], target: npt.NDArray[np.float64]
     ) -> tuple[float, float]:
@@ -193,6 +227,7 @@ class VerticalGraspSolver:
         rng: np.random.Generator,
         weight: float = 1.0,
         accept: Callable[[npt.NDArray[np.float64]], bool] | None = None,
+        prefer: Sequence[float] | None = None,
     ) -> tuple[npt.NDArray[np.float64], float, float]:
         """Best configuration found for a world-frame target, with its error and approach angle.
 
@@ -205,9 +240,19 @@ class VerticalGraspSolver:
         routinely one the arm has folded through itself to hold. A rejected pose is never
         returned, so a square with no acceptable solution reports the closest *unacceptable*
         one's error rather than silently offering a pose the caller already refused.
+
+        `prefer` is a configuration the arm is coming from. The fingers-down constraint leaves
+        roll free, so a square has a continuum of solutions and every one of them reaches it
+        equally well; without a preference the first acceptable one wins, which is a coin toss
+        between poses a quarter-turn apart. Given one, every restart is tried and the closest
+        acceptable pose to `prefer` is returned instead (see `travel_cost`).
         """
         best_qpos = np.array(self._index.arm_qpos, dtype=np.float64)
         best_error, best_angle = np.inf, np.inf
+        toward = None if prefer is None else np.asarray(prefer, dtype=np.float64)
+        nearest: tuple[tuple[int, float, float], npt.NDArray[np.float64], float, float] | None = (
+            None
+        )
         restarts = _IK_RESTARTS if accept is None else _IK_SCREENED_RESTARTS
         for attempt in range(restarts):
             seed = (
@@ -220,10 +265,17 @@ class VerticalGraspSolver:
             solved = error <= MAX_TCP_ERROR and angle <= MAX_APPROACH_DEG
             if accept is not None and solved and not accept(qpos):
                 continue
+            if toward is not None and solved:
+                cost = self.travel_cost(qpos, toward)
+                if nearest is None or cost < nearest[0]:
+                    nearest = (cost, qpos, error, angle)
+                continue
             if error + 0.001 * angle < best_error + 0.001 * best_angle:
                 best_qpos, best_error, best_angle = qpos, error, angle
             if error <= MAX_TCP_ERROR * 0.1 and angle <= 1.0:
                 break
+        if nearest is not None:
+            return nearest[1], nearest[2], nearest[3]
         return best_qpos, best_error, best_angle
 
     def track(
@@ -249,11 +301,12 @@ class VerticalGraspSolver:
         rng: np.random.Generator,
         height: float = GRASP_HEIGHT,
         accept: Callable[[npt.NDArray[np.float64]], bool] | None = None,
+        prefer: Sequence[float] | None = None,
     ) -> GraspPose:
         """Solve a fingers-down pose over one square, `height` above the playing surface."""
         target = board.square_to_world(square, board_pose).astype(np.float64)
         target[2] = board.surface_height + height
-        qpos, error, angle = self.solve(target, rng, accept=accept)
+        qpos, error, angle = self.solve(target, rng, accept=accept, prefer=prefer)
         return GraspPose(
             square=square,
             qpos=(qpos[0], qpos[1], qpos[2], qpos[3], qpos[4]),

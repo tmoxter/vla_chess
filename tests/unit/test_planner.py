@@ -80,6 +80,34 @@ def stub_plan(
     )
 
 
+def test_each_anchor_is_solved_toward_where_the_arm_comes_from() -> None:
+    # Roll is free at both anchors, so an anchor solved without a preference is a coin toss
+    # between poses a half-turn apart, and the transit into it spends its duration spinning.
+    index = StubIndex(Board(), DEFAULT_BOARD_POSE)
+    poses = [(0.1, 0.2, 0.3, 0.4, 0.5), (0.6, 0.7, 0.8, 0.9, 1.0)]
+    seen: list[ArmQpos] = []
+
+    def solve_hover(*_args: object, prefer: ArmQpos, **_kwargs: object) -> ArmQpos:
+        seen.append(prefer)
+        return poses[len(seen) - 1]
+
+    def jaw_axis(*_args: object, **_kwargs: object) -> np.ndarray:
+        return STUB_JAW_AXIS
+
+    spec = MoveSpec(source="d7", target="d6", piece_type=PieceType.PAWN)
+    plan_move(
+        spec,
+        model=None,
+        data=None,
+        index=index,
+        solver=None,
+        rng=np.random.default_rng(0),
+        solve_hover=solve_hover,
+        jaw_axis=jaw_axis,
+    )
+    assert seen == [spec.survey_qpos, poses[0]]
+
+
 def test_waypoint_needs_exactly_one_target() -> None:
     with pytest.raises(ValueError, match="exactly one"):
         Waypoint(Phase.GRASP, 1.0, GRIPPER_OPEN)

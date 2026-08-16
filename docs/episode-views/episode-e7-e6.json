@@ -1,0 +1,68 @@
+{
+  "abort_reason": null,
+  "board_pose": {
+    "x": 0.3,
+    "yaw": 1.5707963267948966
+  },
+  "control_hz": 50.0,
+  "diagnostics": {
+    "control_steps": 805,
+    "max_ik_error": 9.888984912136811e-07,
+    "max_tracking_error": 0.004524457420356343,
+    "sim_steps": 8050,
+    "wall_seconds": 1028.6595839746296
+  },
+  "final_square": "e6",
+  "fps": 10.0,
+  "frames": 161,
+  "grasp_height": 0.025,
+  "grasped": true,
+  "hover_height": 0.065,
+  "instruction": "move the pawn from e7 to e6",
+  "phase_boundaries": {
+    "approach": [
+      50,
+      174
+    ],
+    "descend": [
+      175,
+      249
+    ],
+    "grasp": [
+      250,
+      309
+    ],
+    "lift": [
+      310,
+      384
+    ],
+    "place": [
+      485,
+      559
+    ],
+    "release": [
+      560,
+      619
+    ],
+    "retreat": [
+      620,
+      679
+    ],
+    "survey_end": [
+      680,
+      804
+    ],
+    "survey_start": [
+      0,
+      49
+    ],
+    "transport": [
+      385,
+      484
+    ]
+  },
+  "placed": true,
+  "seed": 0,
+  "source": "e7",
+  "target": "e6"
+}

@@ -206,6 +206,7 @@ def solve_hover_pose(
     height: float,
     rng: np.random.Generator,
     gripper_qpos: float | None = None,
+    prefer: ArmQpos | None = None,
 ) -> ArmQpos:
     """A collision-screened fingers-down configuration `height` above one square.
 
@@ -214,6 +215,9 @@ def solve_hover_pose(
     square allowed to be touched but not penetrated — at an approach opening it should not be
     touched at all. Screening wide open instead would test a jaw that has swung 100 mm clear of
     everything the plan cares about.
+
+    `prefer` is the configuration the leg into this anchor starts from, and picks the anchor out
+    of the roll continuum that is nearest to it.
     """
     baseline = baseline_self_pairs(model, data, index, np.random.default_rng(0))
     hands = hand_body_ids(model)
@@ -237,7 +241,7 @@ def solve_hover_pose(
         return piece_clearance(model, data, piece_body, hands) > 0.0
 
     pose = solver.solve_square(
-        square, index.board, index.board_pose, rng, height=height, accept=accept
+        square, index.board, index.board_pose, rng, height=height, accept=accept, prefer=prefer
     )
     if not pose.is_within_tolerance():
         raise PlanInfeasible(
@@ -271,11 +275,30 @@ def plan_move(
     grip = grip_command(radius, index.gripper_joint_range)
     ready = ready_command(radius, spec.standoff, index.gripper_joint_range)
     ready_qpos = denormalize_gripper(ready, index.gripper_joint_range)
+    # Each anchor is picked nearest to where the arm arrives from: the survey pose for the
+    # first, the source's own anchor for the second. Both anchors are otherwise free in roll,
+    # and an unpicked one costs a transit that spends its whole duration spinning the wrist.
     hover_source = solve_hover(
-        model, data, index, solver, spec.source, spec.hover_height, rng, ready_qpos
+        model,
+        data,
+        index,
+        solver,
+        spec.source,
+        spec.hover_height,
+        rng,
+        ready_qpos,
+        prefer=spec.survey_qpos,
     )
     hover_target = solve_hover(
-        model, data, index, solver, spec.target, spec.hover_height, rng, ready_qpos
+        model,
+        data,
+        index,
+        solver,
+        spec.target,
+        spec.hover_height,
+        rng,
+        ready_qpos,
+        prefer=hover_source,
     )
 
     source_hover_xyz = _above(board, spec.source, board_pose, spec.hover_height)
