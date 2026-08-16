@@ -3,6 +3,7 @@ import pytest
 
 from vla_chess.grasp import GRASP_HEIGHT
 from vla_chess.planner import (
+    GRASP_STANDOFF,
     GRIPPER_OPEN,
     GRIPPER_SHUT,
     ArmQpos,
@@ -19,10 +20,15 @@ from vla_chess.scene import (
     BoardPose,
     PieceType,
     grip_command,
-    stem_radius,
+    grip_radius,
+    ready_command,
 )
 
 GRIPPER_JOINT_RANGE = (-0.17453297762778586, 1.7453291995659765)
+
+# A plan reads the direction the jaws open toward off the solved anchor pose; these tests do not
+# build a model, so they name it instead. Board yaw is pi/2, so this points along a rank.
+STUB_JAW_AXIS = np.array([0.0, 1.0, 0.0])
 
 EXPECTED_PHASES = (
     Phase.SURVEY_START,
@@ -59,6 +65,9 @@ def stub_plan(
     def solve_hover(*_args: object, **_kwargs: object) -> ArmQpos:
         return next(poses)
 
+    def jaw_axis(*_args: object, **_kwargs: object) -> np.ndarray:
+        return STUB_JAW_AXIS
+
     return plan_move(
         MoveSpec(source=source, target=target, piece_type=piece_type, **kwargs),
         model=None,
@@ -67,6 +76,7 @@ def stub_plan(
         solver=None,
         rng=np.random.default_rng(0),
         solve_hover=solve_hover,
+        jaw_axis=jaw_axis,
     )
 
 
@@ -115,13 +125,22 @@ def test_the_survey_transits_are_joint_space_and_the_rest_cartesian() -> None:
 
 def test_the_jaws_are_open_before_the_grasp_and_closed_until_the_release() -> None:
     waypoints = {w.phase: w for w in stub_plan().waypoints}
-    expected = grip_command(stem_radius(PieceType.PAWN, GRASP_HEIGHT), GRIPPER_JOINT_RANGE)
+    radius = grip_radius(PieceType.PAWN, GRASP_HEIGHT)
+    closed = grip_command(radius, GRIPPER_JOINT_RANGE)
+    ready = ready_command(radius, GRASP_STANDOFF, GRIPPER_JOINT_RANGE)
     for phase in (Phase.SURVEY_START, Phase.APPROACH, Phase.DESCEND):
-        assert waypoints[phase].gripper == GRIPPER_OPEN
+        assert waypoints[phase].gripper == ready
     for phase in (Phase.GRASP, Phase.LIFT, Phase.TRANSPORT, Phase.PLACE):
-        assert waypoints[phase].gripper == expected
+        assert waypoints[phase].gripper == closed
     for phase in (Phase.RELEASE, Phase.RETREAT, Phase.SURVEY_END):
-        assert waypoints[phase].gripper == GRIPPER_OPEN
+        assert waypoints[phase].gripper == ready
+
+
+# Opening fully is what swept the moving jaw through the queen on d8 and aborted the episode
+# before this: the jaw is a lever, and at 100 it stands 100 mm out from the pinch.
+def test_the_hand_never_opens_all_the_way_near_the_board() -> None:
+    for waypoint in stub_plan().waypoints:
+        assert waypoint.gripper < GRIPPER_OPEN
 
 
 # The grasp used to command GRIPPER_SHUT, which drives the servo into its stop against whatever
@@ -144,7 +163,7 @@ def test_the_grasp_and_release_sit_over_their_own_squares() -> None:
     source = board.square_to_world("d7", pose)
     target = board.square_to_world("d6", pose)
     assert np.allclose(np.array(waypoints[Phase.GRASP].position)[:2], source[:2], atol=1e-9)
-    assert np.allclose(np.array(waypoints[Phase.RELEASE].position)[:2], target[:2], atol=1e-9)
+    assert np.allclose(np.array(waypoints[Phase.PLACE].position)[:2], target[:2], atol=1e-9)
 
 
 def test_no_waypoint_dips_below_the_playing_surface() -> None:
@@ -156,10 +175,25 @@ def test_no_waypoint_dips_below_the_playing_surface() -> None:
 
 def test_the_grasp_is_held_at_one_height_and_the_lift_clears_it() -> None:
     waypoints = {w.phase: w for w in stub_plan().waypoints}
-    assert waypoints[Phase.GRASP].position == waypoints[Phase.DESCEND].position
-    assert waypoints[Phase.RELEASE].position == waypoints[Phase.PLACE].position
+    assert waypoints[Phase.GRASP].position[2] == waypoints[Phase.DESCEND].position[2]
+    assert waypoints[Phase.RELEASE].position[2] == waypoints[Phase.PLACE].position[2]
     assert waypoints[Phase.LIFT].position[2] > waypoints[Phase.GRASP].position[2]
     assert waypoints[Phase.RETREAT].position[2] > waypoints[Phase.PLACE].position[2]
+
+
+# The descent comes down beside the piece and the grasp slides in; the release backs out the
+# same way. Straight down the piece's axis, the fixed finger drags the piece over on the way
+# past its head, and on the way out contact friction carries it off with the retreat.
+def test_the_descent_and_release_stand_off_along_the_closing_axis() -> None:
+    waypoints = {w.phase: w for w in stub_plan().waypoints}
+    for standing, at in ((Phase.DESCEND, Phase.GRASP), (Phase.RELEASE, Phase.PLACE)):
+        offset = np.array(waypoints[standing].position) - np.array(waypoints[at].position)
+        assert np.allclose(offset, -GRASP_STANDOFF * STUB_JAW_AXIS, atol=1e-12)
+
+
+def test_the_standoff_is_configurable_and_can_be_switched_off() -> None:
+    waypoints = {w.phase: w for w in stub_plan(standoff=0.0).waypoints}
+    assert waypoints[Phase.DESCEND].position == waypoints[Phase.GRASP].position
 
 
 def test_transport_stays_level() -> None:

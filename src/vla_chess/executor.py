@@ -32,6 +32,11 @@ MAX_IK_ERROR: Final = 0.005
 # How far a piece that is not the one being moved may shift before the episode is a failure.
 MAX_BYSTANDER_DRIFT: Final = 0.005
 
+# A stuck or diverging rollout has to end by itself rather than run until someone notices. The
+# budget is the executor's own work: capturing observations happens inside this loop through
+# `on_control_step`, and rendering two cameras instead of one is the caller's cost, not a sim
+# that stopped progressing. Timing it in would have turned "record a witness view as well" into
+# an abort halfway through the episode, which is exactly what it did before this was split out.
 WALL_CLOCK_LIMIT: Final = 600.0
 
 
@@ -172,6 +177,7 @@ class Executor:
         how observation capture attaches without this loop knowing about cameras.
         """
         started = time.monotonic()
+        observing = 0.0
         piece_body = self._index.piece_body_id[plan.spec.source]
         bystanders = {
             square: np.array(data.xpos[body], copy=True)
@@ -230,13 +236,17 @@ class Executor:
                 phases.append(waypoint.phase)
                 max_tracking = max(max_tracking, float(np.max(np.abs(state[:5] - arm))))
                 if on_control_step is not None:
+                    entered = time.monotonic()
                     on_control_step(len(states) - 1, data)
+                    observing += time.monotonic() - entered
 
                 grasped = grasped or (
                     waypoint.phase in (Phase.LIFT, Phase.TRANSPORT)
                     and self._holding(data, piece_body)
                 )
-                abort = abort or self._check_aborts(data, bystanders, started, wall_clock_limit)
+                abort = abort or self._check_aborts(
+                    data, bystanders, started + observing, wall_clock_limit
+                )
                 if abort is not None:
                     break
             if abort is not None:
@@ -271,13 +281,13 @@ class Executor:
         height = float(data.xpos[piece_body][2])
         surface = self._index.board.surface_height
         upright = float(data.xmat[piece_body].reshape(3, 3)[2, 2])
-        return abs(height - surface) < 0.01 and upright > np.cos(np.radians(10.0))
+        return abs(height - surface) < 0.01 and upright > float(np.cos(np.radians(10.0)))
 
     def _check_aborts(
         self,
         data: mujoco.MjData,
         bystanders: dict[str, npt.NDArray[np.float64]],
-        started: float,
+        deadline_from: float,
         wall_clock_limit: float,
     ) -> AbortReason | None:
         if not np.all(np.isfinite(data.qpos)) or not np.all(np.isfinite(data.qvel)):
@@ -289,7 +299,7 @@ class Executor:
             moved = float(np.linalg.norm(data.xpos[self._index.piece_body_id[square]] - origin))
             if moved > MAX_BYSTANDER_DRIFT:
                 return AbortReason.PIECE_DISTURBED
-        if time.monotonic() - started > wall_clock_limit:
+        if time.monotonic() - deadline_from > wall_clock_limit:
             return AbortReason.TIMEOUT
         return None
 

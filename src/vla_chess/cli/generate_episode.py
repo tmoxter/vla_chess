@@ -14,18 +14,18 @@ from vla_chess.grasp import GRASP_HEIGHT, VerticalGraspSolver
 from vla_chess.imaging import contact_sheet, downscale, write_png
 from vla_chess.observe import DEFAULT_FPS, Frame, ObservationRecorder, image_is_sane
 from vla_chess.planner import MoveSpec, plan_move, total_duration
-from vla_chess.render import CameraSpec, Renderer
+from vla_chess.render import CameraSpec, FreeCameraPose, Renderer
 from vla_chess.scene import (
     BIRDS_EYE_ARM_QPOS,
     DEFAULT_BOARD_POSE,
-    PINCH_CLEARANCE,
     RENDER_OFFHEIGHT,
     RENDER_OFFWIDTH,
     WRIST_CAMERA_NAME,
     SceneDescription,
     build_scene,
+    grip_radius,
     make_data,
-    stem_radius,
+    pinch_offset_for,
 )
 
 DEFAULT_OUTPUT_DIR: Final = Path("docs/episode-views")
@@ -33,8 +33,16 @@ SHEET_COLUMNS: Final = 4
 SHEET_PANELS: Final = 12
 SHEET_DOWNSCALE: Final = 2
 
+# A second camera, for people rather than for the policy. The wrist view is the observation and
+# the dataset carries nothing else, but it is also the one view that cannot answer the question
+# a pick-and-place episode is judged on — whether the piece came with the hand — because the
+# hand fills it. This one watches from across the table and is written alongside.
+WITNESS_CAMERA: Final = "witness"
+WITNESS_EYE: Final = (0.10, -0.55, 0.30)
+WITNESS_LOOKAT: Final = (0.30, 0.0, 0.10)
 
-def sheet(frames: Sequence[Frame], panels: int, columns: int) -> np.ndarray:
+
+def sheet(frames: Sequence[Frame], panels: int, columns: int, camera: str) -> np.ndarray:
     """A contact sheet of `panels` frames spread evenly across an episode."""
     picks = np.unique(np.linspace(0, len(frames) - 1, num=min(panels, len(frames))).round()).astype(
         int
@@ -42,16 +50,16 @@ def sheet(frames: Sequence[Frame], panels: int, columns: int) -> np.ndarray:
     tiles = [
         (
             f"{frames[i].phase.value} t={frames[i].timestamp:.2f}",
-            downscale(frames[i].images[WRIST_CAMERA_NAME], SHEET_DOWNSCALE),
+            downscale(frames[i].images[camera], SHEET_DOWNSCALE),
         )
         for i in picks
     ]
     return contact_sheet(tiles, columns)
 
 
-def write_video(path: Path, frames: Sequence[Frame], fps: float) -> bool:
-    """Encode the wrist camera's frames to mp4 with ffmpeg. False if ffmpeg is unavailable."""
-    first = frames[0].images[WRIST_CAMERA_NAME]
+def write_video(path: Path, frames: Sequence[Frame], fps: float, camera: str) -> bool:
+    """Encode one camera's frames to mp4 with ffmpeg. False if ffmpeg is unavailable."""
+    first = frames[0].images[camera]
     height, width, _ = first.shape
     command = [
         "ffmpeg",
@@ -76,7 +84,7 @@ def write_video(path: Path, frames: Sequence[Frame], fps: float) -> bool:
     try:
         process = subprocess.run(
             command,
-            input=b"".join(frame.images[WRIST_CAMERA_NAME].tobytes() for frame in frames),
+            input=b"".join(frame.images[camera].tobytes() for frame in frames),
             capture_output=True,
             check=False,
         )
@@ -103,6 +111,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no-video", action="store_true")
     parser.add_argument(
+        "--no-witness",
+        action="store_true",
+        help="render only the wrist camera the dataset carries, not the onlooker's view",
+    )
+    parser.add_argument(
         "--frames-dir",
         type=Path,
         default=None,
@@ -123,13 +136,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     piece_type = occupant[args.source]
 
-    # The pinch site is built for the piece this episode lifts: the gap between the fixed
-    # finger and the piece at approach is the distance the closing jaw shoves it.
+    # The pinch site is built for the piece this episode lifts: it is the middle of the jaws
+    # when they are closed on that piece, so the piece ends up centred between the faces
+    # instead of shoved against one of them.
     description = SceneDescription(
         board_pose=DEFAULT_BOARD_POSE,
         pieces=pieces,
         arm_qpos=BIRDS_EYE_ARM_QPOS,
-        pinch_offset=stem_radius(piece_type, GRASP_HEIGHT) + PINCH_CLEARANCE,
+        pinch_offset=pinch_offset_for(grip_radius(piece_type, GRASP_HEIGHT)),
     )
     model, index = build_scene(description)
 
@@ -146,9 +160,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     data = make_data(model, index)
     executor = Executor(model, index, control_hz=args.control_hz)
-    with Renderer(
-        model, [CameraSpec(WRIST_CAMERA_NAME, RENDER_OFFWIDTH, RENDER_OFFHEIGHT)]
-    ) as renderer:
+    cameras = [CameraSpec(WRIST_CAMERA_NAME, RENDER_OFFWIDTH, RENDER_OFFHEIGHT)]
+    if not args.no_witness:
+        cameras.append(
+            CameraSpec(
+                WITNESS_CAMERA,
+                RENDER_OFFWIDTH,
+                RENDER_OFFHEIGHT,
+                fovy=45,
+                pose=FreeCameraPose(WITNESS_EYE, WITNESS_LOOKAT),
+            )
+        )
+    with Renderer(model, cameras) as renderer:
         recorder = ObservationRecorder(renderer, fps=args.fps, control_hz=args.control_hz)
         print("executing", flush=True)
         result = executor.run(data, plan, on_control_step=recorder.on_control_step)
@@ -177,16 +200,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"frames failing the image sanity check: {insane}", flush=True)
 
     if frames:
-        sheet_path = args.out_dir / f"episode-{spec.source}-{spec.target}.png"
-        write_png(sheet_path, sheet(frames, SHEET_PANELS, SHEET_COLUMNS))
-        print(f"wrote {sheet_path}", flush=True)
+        stem = f"episode-{spec.source}-{spec.target}"
+        for camera in (camera.name for camera in cameras):
+            suffix = "" if camera == WRIST_CAMERA_NAME else f"-{camera}"
+            sheet_path = args.out_dir / f"{stem}{suffix}.png"
+            write_png(sheet_path, sheet(frames, SHEET_PANELS, SHEET_COLUMNS, camera))
+            print(f"wrote {sheet_path}", flush=True)
 
-        if not args.no_video:
-            video_path = args.out_dir / f"episode-{spec.source}-{spec.target}.mp4"
-            if write_video(video_path, frames, args.fps):
-                print(f"wrote {video_path}", flush=True)
-            else:
-                print("ffmpeg unavailable or failed; skipped the video", flush=True)
+            if not args.no_video:
+                video_path = args.out_dir / f"{stem}{suffix}.mp4"
+                if write_video(video_path, frames, args.fps, camera):
+                    print(f"wrote {video_path}", flush=True)
+                else:
+                    print("ffmpeg unavailable or failed; skipped the video", flush=True)
 
         if args.frames_dir is not None:
             args.frames_dir.mkdir(parents=True, exist_ok=True)

@@ -293,23 +293,17 @@ GRIPPER_SITE_NAME: Final = "gripperframe"
 # and screened clean, because the contact check exempted the piece being grasped. The vendored
 # site stays in the model and stays untouched; nothing solves against it. See docs/trajectory.md.
 #
-# The pinch site is that frame shifted along +x, far enough to clear the widest stem this piece
-# set presents at grasp height (12 mm, queen and king) with 1.5 mm to spare, so an approach
-# never touches the piece and closure brings it to rest against the fixed finger.
+# The pinch site is that frame shifted along +x to the middle of the closed jaws, so a piece
+# standing on the TCP ends up centred between the two faces rather than shoved against one.
+# `pinch_offset_for` is where that number comes from, and it is per piece, carried by the
+# scene (`SceneDescription.pinch_offset`) rather than fixed by this module: the offset depends
+# on what the fingers close on, and one site sized for the widest piece leaves a pawn with
+# millimetres of run-up before the second jaw arrives — the shove that toppled the d7 pawn into
+# the king on e8 and aborted the first episode that got this far.
 #
-# The offset is per piece, not one constant for the set, and that was settled by measurement
-# rather than taste. A closing jaw drives the piece against the fixed finger, so whatever
-# distance separates them at approach is distance the piece gets shoved — and a shove applied
-# 25 mm above the board tips a piece at lower force than it slides one. Sized once to the
-# widest stem (12 mm) it left a 9 mm pawn stem 4.5 mm of run-up: the d7 pawn was pushed 17 mm
-# and toppled into the king on e8, aborting the episode on bystander drift. Sized to the piece
-# actually being lifted, the shove is `PINCH_CLEARANCE` and nothing else.
-#
-# The scene therefore carries the offset (`SceneDescription.pinch_offset`) rather than the
-# module: one site, built for the piece that episode moves.
-PINCH_CLEARANCE: Final = 0.0015
-WIDEST_STEM_RADIUS: Final = 0.012
-DEFAULT_PINCH_OFFSET: Final = WIDEST_STEM_RADIUS + PINCH_CLEARANCE
+# The default below is for callers with no piece in mind — the reference-grasp solver and the
+# reachability sweep, which place a TCP rather than close on anything.
+DEFAULT_GRIP_RADIUS: Final = 0.014
 TCP_SITE_NAME: Final = "pinchframe"
 
 FILES: Final = "abcdefgh"
@@ -451,44 +445,121 @@ def make_data(model: mujoco.MjModel, index: SceneIndex) -> mujoco.MjData:
     return data
 
 
-# Jaw gap as a function of the gripper joint angle, over the openings that admit a chess piece
-# (qpos -0.02 to +0.16, gaps 14-28 mm). Measured off the vendored meshes rather than derived:
-# the jaw face is a printed surface swinging about a hinge, so there is no tidy closed form.
-# Linear to within 0.11 mm across that span, comfortably under the squeeze a grip closes by.
-JAW_GAP_AT_ZERO: Final = 0.01577
-JAW_GAP_PER_RADIAN: Final = 0.07291
+# Everything below describes the hand *as the physics engine collides it*, which is not the
+# hand the meshes draw. MuJoCo collides a mesh as its convex hull, and the fixed finger is a
+# forked printed part whose hull fills the fork — so its contact face stands 11.6 mm inboard of
+# the face the mesh shows. Sizing a grip off the mesh therefore commands the jaw ~12 mm past
+# where it can go: measured, the first working geometry crushed 6-8 mm into a 9 mm stem, and
+# the piece squirted out of the jaws under the lift. These constants are measured by closing on
+# a real piece at a real grasp pose and bisecting for first contact, which is the only method
+# that cannot disagree with what the simulator then does. Re-measure them if the hand's
+# collision geometry changes; `docs/trajectory.md` records the probe.
+#
+# The mesh-derived pair these replaced (gap 15.8 mm at qpos 0, 72.9 mm/rad) is what the fork's
+# hull costs: 11.6 mm of it, plus a shallower rate, because the hull's face is not the mesh
+# face swinging on the same arc.
+FIXED_FACE_INSET: Final = 0.01159
+GAP_AT_ZERO: Final = 0.00667
+GAP_PER_RADIAN: Final = 0.0557
 
-# How far past first contact a grip closes. Commanding the mechanical stop instead saturates
-# the servo — ~3.35 N·m over a ~77 mm lever is ~43 N of pinch on a 15 g piece — so the command
-# is sized to the piece and this is the whole of the overlap it asks for.
-GRIP_SQUEEZE: Final = 0.001
+# The fingers' own extent along the piece's axis, relative to the TCP: they reach 8 mm below it
+# and 26 mm above. A piece is gripped by whatever it presents in that band, which is why
+# `grip_radius` is not a stem radius — on a pawn the head (10 mm) is wider than the stem (9 mm)
+# and stands inside the band, so the faces bear on the head first.
+FINGER_BAND: Final = (-0.008, 0.026)
+
+# How far past first contact a grip closes. Two of these four millimetres are spent reaching
+# the stem past a head that is 1 mm wider on each side; the rest is the squeeze proper. At
+# 2 mm the pinch holds only the head — two point contacts on a sphere — and the piece rolls out
+# under the lift. Commanding the mechanical stop instead saturates the servo (~3.35 N·m over a
+# ~77 mm lever, ~43 N on a 15 g piece), which is why the command is sized to the piece at all.
+GRIP_SQUEEZE: Final = 0.004
+
+# Slack in the opening the hand approaches and leaves a piece at, over what the piece and its
+# standoff need. It buys the descent its clearance on the jaw side; the fixed side gets the
+# standoff itself.
+APPROACH_MARGIN: Final = 0.003
+
+# Friction has to resolve as stiffly as the normal direction, or a pinch creeps. MuJoCo's
+# defaults (pyramidal cone, impratio 1) let a correctly-sized grip slide: measured on the
+# `d7 -> d6` episode, the same plan that places the pawn at these settings leaves it on its own
+# square at the defaults, at every squeeze tried up to 6 mm, because the piece slips down
+# through the closed jaws while the arm lifts. Elliptic cone plus this ratio holds it. The
+# ratio is a plateau rather than a tuned point — 8, 10, 12 and 15 all place the piece — but
+# 20 does not: contacts that stiff go unstable at this timestep and throw the piece.
+FRICTION_IMPEDANCE_RATIO: Final = 10.0
 
 
-def stem_radius(piece_type: PieceType, height: float) -> float:
-    """Radius of the geom `piece_type` presents at `height` above its own base."""
-    spanning = [
-        geom
-        for geom in PIECE_GEOMS[piece_type]
-        if geom.shape == "cylinder"
-        and geom.pos[2] - geom.size[1] <= height <= geom.pos[2] + geom.size[1]
-    ]
-    if len(spanning) != 1:
+def _radius_at(geom: _PieceGeom, height: float) -> float:
+    """Radius `geom` presents at `height` above the piece's base, or 0 where it is absent."""
+    if geom.shape == "cylinder":
+        spans = geom.pos[2] - geom.size[1] <= height <= geom.pos[2] + geom.size[1]
+        return geom.size[0] if spans else 0.0
+    if geom.shape == "sphere":
+        offset = abs(height - geom.pos[2])
+        return float(np.sqrt(geom.size[0] ** 2 - offset**2)) if offset <= geom.size[0] else 0.0
+    if geom.shape == "capsule":
+        offset = abs(height - geom.pos[2])
+        if offset <= geom.size[1]:
+            return geom.size[0]
+        offset -= geom.size[1]
+        return float(np.sqrt(geom.size[0] ** 2 - offset**2)) if offset <= geom.size[0] else 0.0
+    # Boxes are the knight's and king's decorations, well above any grasp height.
+    half = max(geom.size[0], geom.size[1])
+    return half if abs(height - geom.pos[2]) <= geom.size[2] else 0.0
+
+
+def grip_radius(piece_type: PieceType, tcp_height: float) -> float:
+    """Widest radius `piece_type` presents where the fingers are, with the TCP at `tcp_height`.
+
+    The jaws close on the widest thing between them, not on the part the TCP happens to sit
+    beside, so this is what every jaw command and the pinch offset are sized from.
+    """
+    lo, hi = max(tcp_height + FINGER_BAND[0], 0.0), tcp_height + FINGER_BAND[1]
+    # Every shape here is widest at its own centre height and narrows away from it, so the
+    # widest point inside the band is the centre clamped into it — exactly, without sampling.
+    radius = max(
+        _radius_at(geom, min(max(geom.pos[2], lo), hi)) for geom in PIECE_GEOMS[piece_type]
+    )
+    if radius <= 0.0:
         raise ValueError(
-            f"{piece_type.value} presents {len(spanning)} cylinders at {height * 1000:.0f} mm, "
-            "so it has no single stem to close on there"
+            f"{piece_type.value} presents nothing between {lo * 1000:.0f} and {hi * 1000:.0f} mm, "
+            "so the fingers have nothing to close on there"
         )
-    return spanning[0].size[0]
+    return radius
+
+
+def pinch_offset_for(radius: float) -> float:
+    """Where the pinch site goes so a piece of `radius` ends up centred between the faces."""
+    return FIXED_FACE_INSET + radius - GRIP_SQUEEZE / 2.0
+
+
+DEFAULT_PINCH_OFFSET: Final = FIXED_FACE_INSET + DEFAULT_GRIP_RADIUS - GRIP_SQUEEZE / 2.0
 
 
 def gripper_qpos_for_gap(gap: float) -> float:
-    """Gripper joint angle at which the jaws stand `gap` apart."""
-    return (gap - JAW_GAP_AT_ZERO) / JAW_GAP_PER_RADIAN
+    """Gripper joint angle at which the faces that collide stand `gap` apart."""
+    return (gap - GAP_AT_ZERO) / GAP_PER_RADIAN
 
 
 def grip_command(radius: float, joint_range: tuple[float, float]) -> float:
-    """The `[0, 100]` jaw command that closes on a stem of `radius` with a light squeeze."""
+    """The `[0, 100]` jaw command that closes on a piece of `radius` with a light squeeze."""
     return normalize_gripper(
         gripper_qpos_for_gap(2.0 * radius - GRIP_SQUEEZE),
+        joint_range,
+    )
+
+
+def ready_command(radius: float, standoff: float, joint_range: tuple[float, float]) -> float:
+    """The `[0, 100]` jaw command the hand approaches and leaves a piece at.
+
+    Wide enough to swallow a piece of `radius` sitting `standoff` off the pinch axis with a
+    margin, and no wider: the jaw is a lever that reaches 100 mm past the pinch when it is
+    opened fully, which sweeps clean through whatever stands on the neighbouring square. Held
+    to this opening it reaches 34 mm, and the nearest neighbour's stem is 34 mm away.
+    """
+    return normalize_gripper(
+        gripper_qpos_for_gap(2.0 * radius + standoff + APPROACH_MARGIN),
         joint_range,
     )
 
@@ -657,6 +728,8 @@ def build_scene(desc: SceneDescription) -> tuple[mujoco.MjModel, SceneIndex]:
     spec = mujoco.MjSpec.from_file(str(SO101_XML_PATH))
     spec.visual.global_.offwidth = RENDER_OFFWIDTH
     spec.visual.global_.offheight = RENDER_OFFHEIGHT
+    spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
+    spec.option.impratio = FRICTION_IMPEDANCE_RATIO
     _add_pinch_site(spec, desc.pinch_offset)
 
     worldbody = spec.worldbody

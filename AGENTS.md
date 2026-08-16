@@ -47,6 +47,17 @@ expected to move to see them.
   `grasp.finger_axis_site_frame`) rather than writing a fresh orientation constraint. Reaching
   the target is the easy half — screen candidate poses for collisions and restart, or the
   solver will hand back a pose that reaches the square through the arm's own body.
+- **Size anything the hand does against the hull, not the mesh.** MuJoCo collides meshes as
+  convex hulls and the fixed finger is a fork whose hull fills it, so its contact face stands
+  11.6 mm inboard of the face the mesh draws. Jaw commands, the pinch offset and the approach
+  opening all come from `scene.FIXED_FACE_INSET`, `GAP_AT_ZERO` and `GAP_PER_RADIAN`, which are
+  measured by closing on a real piece and bisecting for first contact — a grip sized off mesh
+  geometry commanded 6 mm of interference and looked correct in every render. Screening is the
+  other way round: `collision.piece_clearance` uses the true meshes, because the question there
+  is whether the real hand would hit something. See `docs/trajectory.md`.
+- **The jaws close on the widest thing between the fingers.** Not on whatever the TCP sits
+  beside: the fingers span 8 mm below the TCP to 26 mm above it, and a pawn's head is inside
+  that band and wider than its stem. Use `scene.grip_radius`.
 - **There is exactly one board pose: `scene.DEFAULT_BOARD_POSE` (x = 0.300).** Everything
   solved against the board — the reference grasps above all — is solved against it, and a
   second board distance has already been in this tree once: reference poses from one distance
@@ -55,7 +66,9 @@ expected to move to see them.
   framing above it), so do not re-tune it against a reach or coverage count. It was signed off
   by eye, and `pixi run render-reference-views` regenerates exactly what was looked at — if the
   pose ever moves, re-inspect those and get the new ones signed off too. See
-  `docs/grasp-poses.md` and `docs/reference-views.md`.
+  `docs/grasp-poses.md` and `docs/reference-views.md`. The d8/e8 argument for this distance was
+  made against a grasp frame since corrected, and does not hold at the current one; the board
+  has been left where the eye put it, pending that re-inspection (`docs/trajectory.md`).
 
 ### Running `pixi run test-slow`
 

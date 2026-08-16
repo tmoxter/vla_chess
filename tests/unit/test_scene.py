@@ -1,21 +1,30 @@
+import mujoco
 import numpy as np
 import pytest
 
 from vla_chess.grasp import GRASP_HEIGHT
 from vla_chess.scene import (
+    APPROACH_MARGIN,
+    DEFAULT_GRIP_RADIUS,
     DEFAULT_PINCH_OFFSET,
-    PIECE_GEOMS,
-    PINCH_CLEARANCE,
-    WIDEST_STEM_RADIUS,
+    FIXED_FACE_INSET,
+    FRICTION_IMPEDANCE_RATIO,
+    GAP_AT_ZERO,
+    GAP_PER_RADIAN,
+    GRIP_SQUEEZE,
     Board,
     BoardPose,
     PieceColor,
     PiecePlacement,
     PieceType,
     SceneDescription,
+    build_scene,
     denormalize_gripper,
+    grip_command,
+    grip_radius,
     normalize_gripper,
-    stem_radius,
+    pinch_offset_for,
+    ready_command,
 )
 
 RNG = np.random.default_rng(0)
@@ -146,42 +155,90 @@ class TestSceneDescription:
         assert len(desc.pieces) == 2
 
 
+class TestGripRadius:
+    """What the jaws close on is the widest thing between the fingers, not the stem."""
+
+    def radii(self) -> dict[PieceType, float]:
+        return {piece_type: grip_radius(piece_type, GRASP_HEIGHT) for piece_type in PieceType}
+
+    def test_every_piece_type_offers_the_fingers_something_at_grasp_height(self) -> None:
+        assert set(self.radii()) == set(PieceType)
+        assert all(radius > 0.0 for radius in self.radii().values())
+
+    # The pawn is the case that taught this: its head is 1 mm wider than the stem the TCP sits
+    # beside, stands inside the fingers' own band, and so is what the faces actually bear on.
+    def test_a_pawn_is_gripped_by_its_head_not_its_stem(self) -> None:
+        assert grip_radius(PieceType.PAWN, GRASP_HEIGHT) == pytest.approx(0.010)
+
+    # The default is what a scene gets when the caller names no piece, so nothing in the set
+    # may be wider than it.
+    def test_the_default_grip_radius_covers_the_piece_set(self) -> None:
+        assert max(self.radii().values()) <= DEFAULT_GRIP_RADIUS + 1e-9
+
+
 class TestPinchOffset:
-    """The pinch site has to clear every stem it will be asked to close on."""
+    """The pinch site is the middle of the jaws when they are closed on the piece."""
 
-    def stems(self) -> dict[PieceType, float]:
-        """Radius of the geom each piece type presents at grasp height."""
-        radii = {}
-        for piece_type, geoms in PIECE_GEOMS.items():
-            spanning = [
-                geom
-                for geom in geoms
-                if geom.shape == "cylinder"
-                and geom.pos[2] - geom.size[1] <= GRASP_HEIGHT <= geom.pos[2] + geom.size[1]
-            ]
-            assert len(spanning) == 1, f"{piece_type} is not a single cylinder at grasp height"
-            radii[piece_type] = spanning[0].size[0]
-        return radii
+    def test_a_piece_ends_up_centred_between_the_faces(self) -> None:
+        for piece_type in PieceType:
+            radius = grip_radius(piece_type, GRASP_HEIGHT)
+            offset = pinch_offset_for(radius)
+            # The fixed face lands a squeeze inside the piece's own surface, and the jaw closes
+            # to a gap of the same depth on the other side, so the two are symmetric about the
+            # site rather than one of them holding the piece against the other.
+            face_to_axis = offset - FIXED_FACE_INSET
+            assert radius - face_to_axis == pytest.approx(GRIP_SQUEEZE / 2.0)
 
-    def test_every_piece_type_presents_a_stem_at_grasp_height(self) -> None:
-        assert set(self.stems()) == set(PieceType)
+    def test_the_default_offset_follows_the_same_rule(self) -> None:
+        assert pinch_offset_for(DEFAULT_GRIP_RADIUS) == pytest.approx(DEFAULT_PINCH_OFFSET)
 
-    def test_the_widest_stem_constant_matches_the_piece_set(self) -> None:
-        assert max(self.stems().values()) == pytest.approx(WIDEST_STEM_RADIUS)
 
-    # The default has to clear every stem, since it is what a scene gets when the caller does
-    # not say which piece it intends to lift.
-    def test_the_default_offset_clears_every_stem(self) -> None:
-        for piece_type, radius in self.stems().items():
-            assert radius < DEFAULT_PINCH_OFFSET, f"{piece_type.value} stem reaches the pinch site"
+class TestJawCommands:
+    """What the hand is told to do with the piece between its fingers."""
 
-    def test_the_default_offset_leaves_the_documented_clearance(self) -> None:
-        assert pytest.approx(PINCH_CLEARANCE) == DEFAULT_PINCH_OFFSET - WIDEST_STEM_RADIUS
+    RANGE = (-0.17453297762778586, 1.7453291995659765)
+    STANDOFF = 0.005
 
-    # What the per-piece offset buys: the shove a closing jaw gives the piece is the gap it has
-    # to cross, so sizing the site to the piece caps that at the clearance. Sized once to the
-    # widest stem it was 4.5 mm for a pawn, which toppled it. See scene.PINCH_CLEARANCE.
-    def test_a_per_piece_offset_caps_the_shove_at_the_clearance(self) -> None:
-        for piece_type, radius in self.stems().items():
-            offset = stem_radius(piece_type, GRASP_HEIGHT) + PINCH_CLEARANCE
-            assert offset - radius == pytest.approx(PINCH_CLEARANCE)
+    def commands(self, piece_type: PieceType) -> tuple[float, float]:
+        radius = grip_radius(piece_type, GRASP_HEIGHT)
+        return (
+            grip_command(radius, self.RANGE),
+            ready_command(radius, self.STANDOFF, self.RANGE),
+        )
+
+    def test_every_piece_can_be_gripped_and_approached_within_the_joint(self) -> None:
+        for piece_type in PieceType:
+            for command in self.commands(piece_type):
+                assert 0.0 < command < 100.0, piece_type.value
+
+    def test_the_approach_opening_is_wider_than_the_grip(self) -> None:
+        for piece_type in PieceType:
+            grip, ready = self.commands(piece_type)
+            assert ready > grip, piece_type.value
+
+    # Opening fully swings the jaw 100 mm past the pinch, through whatever stands on the next
+    # square; the approach opening has to stay far short of it. See docs/trajectory.md.
+    def test_the_approach_opening_stays_well_short_of_the_stop(self) -> None:
+        for piece_type in PieceType:
+            assert self.commands(piece_type)[1] < 50.0, piece_type.value
+
+    def test_the_approach_opening_admits_the_piece_and_its_standoff(self) -> None:
+        for piece_type in PieceType:
+            radius = grip_radius(piece_type, GRASP_HEIGHT)
+            _, ready = self.commands(piece_type)
+            gap = GAP_AT_ZERO + GAP_PER_RADIAN * denormalize_gripper(ready, self.RANGE)
+            assert gap == pytest.approx(2 * radius + self.STANDOFF + APPROACH_MARGIN)
+
+    def test_a_wider_piece_is_gripped_with_the_jaws_further_apart(self) -> None:
+        pawn = grip_command(grip_radius(PieceType.PAWN, GRASP_HEIGHT), self.RANGE)
+        king = grip_command(grip_radius(PieceType.KING, GRASP_HEIGHT), self.RANGE)
+        assert king > pawn
+
+
+class TestContactModel:
+    """MuJoCo's defaults let a correctly-sized pinch creep, and the piece slides out of it."""
+
+    def test_the_scene_resolves_friction_as_stiffly_as_the_normal_direction(self) -> None:
+        model, _ = build_scene(SceneDescription())
+        assert model.opt.cone == mujoco.mjtCone.mjCONE_ELLIPTIC
+        assert model.opt.impratio == pytest.approx(FRICTION_IMPEDANCE_RATIO)

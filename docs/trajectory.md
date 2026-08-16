@@ -1,18 +1,29 @@
 # Single-episode trajectory
 
-`pixi run generate-episode` plans, executes and records one pick-and-place episode and writes
-its wrist-camera view to `docs/episode-views/`. Every number below comes from that task on this
-host, or from the probes described alongside it; none are estimates.
+`pixi run generate-episode` plans, executes and records one pick-and-place episode and writes it
+to `docs/episode-views/`: the wrist camera, which is the observation the dataset carries, and a
+witness view from across the table, which is the only one that can show whether the piece came
+with the hand. Every number below comes from that task on this host, or from the probes
+described alongside it; none are estimates.
 
-The episode is `d7 -> d6`, a black centre pawn one square forward. Black, not white: only 30 of
-64 squares have a collision-free fingers-down pose at all and every one of them is on ranks 5-8
+**The episode picks the piece up and puts it down.** `d7 -> d6`, a black centre pawn one square
+forward: grasped, lifted, carried, placed and released, ending upright on `d6` with the arm back
+at the survey pose. What it took is the second half of this document; the first half is the four
+failures that came before it, kept because each one was invisible until the thing after it broke.
+
+Black, not white: the squares with a collision-free fingers-down pose are all on ranks 5-8
 (`assets/reference_grasps.json`), so a white pawn's `d2 -> d3` has no grasp pose at either end.
 The plan's Step 7 acceptance criterion still names `d2 -> d4`; that test cannot pass as written.
 
 ## Shape of the plan
 
 Ten legs: `survey_start approach descend grasp lift transport place release retreat survey_end`,
-15.3 s at 50 Hz control, captured at 10 fps.
+16.1 s at 50 Hz control, captured at 10 fps.
+
+The descent stops beside the piece rather than over it, and the grasp leg slides in; the release
+backs out the same way before the retreat lifts. Both are `planner.GRASP_STANDOFF`, 5 mm along
+the jaws' own closing direction, and both exist because only one finger moves — see *Only one
+finger moves* below.
 
 The episode opens and closes at `BIRDS_EYE_ARM_QPOS` rather than at the resting pose, because
 the wrist camera is the only observation and at rest the arm is blind to ranks 7-8 — its own
@@ -211,17 +222,127 @@ The episode no longer dies on the descent. It now reaches the `grasp` phase and 
 a bystander disturbed while the jaws close — the failure mode item 4 above was aimed at, not this
 one. The base is no longer in the way of diagnosing it.
 
-### What this leaves
+## The grip was sized against a hand the simulator does not have
 
-A pinch frame of our own, and only that: a second site in the `gripper` body offset along the
-closing axis to the midline between the finger faces, with the reference grasps re-solved against
-it. The offset is roughly half an object width, not 6 cm — for the pawn's 18 mm stem the target
-is near x = +0.001 against the site's -0.0079, so about 9 mm. It is not one constant for the set:
-stem radii run 9 mm (pawn) to 12.5 mm (rook), so what the site should be pinned to — a nominal
-opening, the fixed-finger face plus half a nominal width, or a per-piece-type offset — is a
-decision this probe surfaces but does not make. Re-solving moves the frame every reference grasp
-and every reachability figure was derived against, so `assets/reference_grasps.json` and the
-30-of-64 count in `docs/reachability.md` do not survive the change unexamined.
+With the base out of the way the descent was clean and the jaws closed on the pawn, and the pawn
+still came out of them under the lift, sliding 25 mm down through the closed jaws over a 40 mm
+rise and dropping. The pinch force at the start of the lift was ~10 N against a piece weighing
+0.15 N, with friction 1.0 on every surface involved. Nothing about that adds up, and it did not:
+the jaws were not closed on the pawn, they were crushing it.
+
+MuJoCo collides a mesh as its convex hull. The fixed finger is a forked printed part, and its
+hull fills the fork — the same inflation `collision.baseline_self_pairs` documents for the
+shoulder bracket, on the one part of the arm where it decides what a grip is. Measured, with the
+pinch site 20 mm out from the vendored frame:
+
+| | mesh | what collides |
+|---|---|---|
+| fixed finger's face, from the pinch site | 20.0 mm | 8.4 mm |
+| gap at `gripper` qpos 0 | 15.8 mm | 6.7 mm |
+| gap per radian | 72.9 mm | 55.7 mm |
+
+So a grip sized off the meshes — the previous `JAW_GAP_AT_ZERO` and `JAW_GAP_PER_RADIAN` — asked
+for a 17 mm gap on an 18 mm pawn and actually commanded 11.9 mm: 6 mm of interference, resolved
+by the contact solver as a piece squeezed hard enough to squirt out sideways when anything else
+touched it. The measurement above is now what the code uses (`scene.FIXED_FACE_INSET`,
+`GAP_AT_ZERO`, `GAP_PER_RADIAN`), and it is taken the only way that cannot disagree with the
+simulator: close on a real piece at a real grasp pose, shift the piece along the closing axis and
+bisect for the first contact, once per finger. Re-measure it if the hand's collision geometry
+changes.
+
+## The jaws bear on the head, not on the stem
+
+The fingers reach 8 mm below the TCP and 26 mm above it. A pawn's head — a 10 mm sphere at 42 mm,
+1 mm wider than the 9 mm stem the TCP sits beside — stands inside that band, so the faces close
+on the head first and the stem never gets touched. A sphere between two flat faces is two point
+contacts: correctly sized to the head, with 2 mm of squeeze, the pinch held the pawn through the
+lift and rolled it out during the transport.
+
+`scene.grip_radius` is therefore the widest radius the piece presents *where the fingers are*,
+not the radius at the TCP's own height, and `GRIP_SQUEEZE` is 4 mm — two of them spent reaching
+the stem past the head, the rest the squeeze proper. This is why the pinch offset is per piece
+and lives on the scene: it is a piece property, and one site sized for the whole set puts a
+pawn 4 mm off the middle of the jaws.
+
+## Only one finger moves
+
+The fixed finger sits a piece-radius from the pinch and cannot get out of the way, which costs
+two waypoints:
+
+- **Going in.** A descent straight down the piece's axis drags that finger past the head, which
+  is wider than the grip the site is sized to. Measured on the old frame, the clearance at the
+  head's equator was 0.8 mm and the finger caught it, tipping the pawn 4 mm before the jaws
+  closed on anything. The descent now stops 5 mm short along the closing axis, putting the piece
+  on the moving jaw's side of the gap, and the grasp leg slides in as it closes.
+- **Coming out.** Opening the jaw does not release the piece: it leaves it resting against the
+  fixed finger with a few tenths of a newton of residual contact, and friction against 0.15 N of
+  pawn wins. The pawn was carried up with the retreat, still touching, and flung across the board
+  during the survey transit — an episode that then reported `placed=True` because the piece
+  happened to land back on the target square. The release backs the hand out along the same axis
+  before the retreat lifts.
+
+## Fully open is not a posture for the board
+
+`GRIPPER_OPEN` swings the moving jaw 100 mm past the pinch. The neighbouring square's centre is
+46 mm away and the queen's stem starts 34 mm away, so closing from fully open sweeps the jaw
+straight through whatever stands on the next square: measured at the `d7` grasp pose, the jaw
+penetrates `d8`'s queen by up to 9.7 mm on its way in, and that is what the first episode to
+reach the `grasp` phase aborted on. Nothing in a plan opens fully any more. `scene.ready_command`
+opens only far enough to swallow the piece and its standoff, which reaches 34 mm at the pose
+above and clears the queen by 3.8 mm.
+
+The screening followed: `planner.solve_hover_pose` now screens at the opening the plan will be
+holding rather than at the fully-open pose, which is not one the hand is ever in near the board.
+
+## Friction has to resolve as stiffly as the normal direction
+
+With the geometry corrected the grip was gentle — 2 mm of interference, both faces on the piece —
+and the pawn slid out of it anyway, at every squeeze up to 6 mm. MuJoCo's default contact model
+(pyramidal friction cone, `impratio` 1) resolves friction softly enough that a pinch creeps. The
+scene now builds with an elliptic cone and `impratio` 10 (`scene.FRICTION_IMPEDANCE_RATIO`), on
+which the same plan places the piece. It is a plateau, not a tuned point — 8, 10, 12 and 15 all
+place it — bounded above: at 20 the contacts go unstable at this timestep and throw the piece
+129 mm into the air.
+
+## The episode that works
+
+805 control steps, 16.1 s, 161 frames, no aborts. Maximum tracking error 0.0082 rad, maximum IK
+error along the whole Cartesian path under 0.01 mm. The pawn ends on `d6`, upright, 51.4 mm from
+where it started — one square. The largest movement of any other piece on the board is 0.09 mm,
+which is the settling floor every piece shows in the first control step.
+
+| phase | piece height above the surface | max tilt |
+|---|---|---|
+| descend | -0.1 mm (untouched) | 0.0 deg |
+| grasp | 0.4 mm | 1.7 deg |
+| lift | 38.4 mm | 2.2 deg |
+| transport | 36.4 - 38.4 mm | 2.4 deg |
+| place | back to the surface | 2.1 deg |
+| release | -0.6 mm, hand withdrawing | 1.2 deg |
+| retreat, survey_end | untouched, at rest | 0.0 deg |
+
+The same plan places the piece for `b7 -> b6`, `c7 -> c6` and `e7 -> e6`, and for the seeds that
+pick different anchor poses out of the solver.
+
+## What it costs: the reference set and the board pose
+
+The corrected pinch site sits ~8 mm further out than the one `assets/reference_grasps.json` was
+solved against, and reach falls off sharply in that direction. Re-solving at the corrected frame
+gives 28 of 64 squares against the committed 30, and the two it loses are `d8` and `e8` — the
+black queen and king on their home squares. Measured, and not a screening artifact: screening at
+the approach opening instead of wide open changes nothing, the offset alone does it.
+
+That matters beyond a count. `DEFAULT_BOARD_X` sits at 0.300 *because* d8 and e8 became liftable
+there, and that argument was made against the frame this document has just shown to be 12 mm out.
+The floor moved out once already when the grasp frame moved (0.293 -> 0.298); the same reasoning
+says it moves again now, to somewhere past the current board distance.
+
+Recovering them therefore means moving the board out again and re-searching the survey pose,
+which `scene.py`'s standing rule says happens on a visual re-inspection and never on a coverage
+count alone. So the board has not been moved, `assets/reference_grasps.json` has not been
+re-solved, and this paragraph is the note that both are now waiting on that inspection. The
+episode does not depend on either: it solves its own anchor poses, at its own piece's pinch
+offset, in the scene it executes in.
 
 ## Wrist roll is unconstrained, and the observation shows it
 

@@ -19,13 +19,17 @@ from vla_chess.collision import (
 )
 from vla_chess.grasp import GRASP_HEIGHT, VerticalGraspSolver
 from vla_chess.scene import (
+    ARM_JOINT_NAMES,
     BIRDS_EYE_ARM_QPOS,
+    GRIPPER_BODY_NAME,
     Board,
     BoardPose,
     PieceType,
     SceneIndex,
+    denormalize_gripper,
     grip_command,
-    stem_radius,
+    grip_radius,
+    ready_command,
 )
 
 ArmQpos = tuple[float, float, float, float, float]
@@ -37,12 +41,22 @@ ArmQpos = tuple[float, float, float, float, float]
 # — see docs/trajectory.md, which records the sweep and what it costs.
 HOVER_HEIGHT: Final = 0.065
 
+# The ends of the joint's travel. Nothing in a plan commands either: closing on a piece means
+# closing to that piece (see scene.grip_command), and driving to the stop instead saturates the
+# servo against whatever is in the way, while opening fully swings the jaw 100 mm past the pinch
+# — through whatever stands on the next square. Approaching and leaving is `scene.ready_command`.
 GRIPPER_OPEN: Final = 100.0
-
-# Fully shut, jaws against each other. Nothing commands it: closing on a piece means closing to
-# that piece's own stem (see scene.grip_command), and driving to the stop instead saturates the
-# servo against whatever is in the way. Kept as the name for the end of the joint's travel.
 GRIPPER_SHUT: Final = 0.0
+
+# How far the hand stands off the piece's axis, along the jaws' own closing direction, while it
+# descends and while it leaves. It exists because only one finger moves. The fixed finger sits
+# a piece-radius from the pinch and cannot get out of the way, so a descent straight down the
+# piece's axis drags it past whatever the piece presents above the grasp height — on a pawn the
+# head, 1 mm wider than the stem the grip is sized to. Standing off puts the piece on the
+# moving jaw's side of the gap on the way in, and on the way out it is what actually releases:
+# opening the jaw leaves the piece resting against the fixed finger, close enough that contact
+# friction alone carried it away with the retreat until the hand backed off first.
+GRASP_STANDOFF: Final = 0.005
 
 
 class Phase(Enum):
@@ -100,15 +114,16 @@ class MoveSpec:
     piece_type: PieceType
     hover_height: float = HOVER_HEIGHT
     grasp_height: float = GRASP_HEIGHT
+    standoff: float = GRASP_STANDOFF
     survey_qpos: ArmQpos = BIRDS_EYE_ARM_QPOS
     survey_dwell: float = 1.0
     approach_duration: float = 2.5
     descend_duration: float = 1.5
-    grasp_duration: float = 0.8
+    grasp_duration: float = 1.2
     lift_duration: float = 1.5
     transport_duration: float = 2.0
     place_duration: float = 1.5
-    release_duration: float = 0.8
+    release_duration: float = 1.2
     retreat_duration: float = 1.2
     return_duration: float = 2.5
 
@@ -151,6 +166,37 @@ def _above(
     return (float(point[0]), float(point[1]), float(board.surface_height + height))
 
 
+def _stand_off(
+    point: tuple[float, float, float], axis: npt.NDArray[np.float64], distance: float
+) -> tuple[float, float, float]:
+    """`point` pulled back along the closing axis, putting the piece on the moving jaw's side."""
+    stood = np.asarray(point, dtype=np.float64) - distance * axis
+    return (float(stood[0]), float(stood[1]), float(stood[2]))
+
+
+def closing_axis(
+    model: mujoco.MjModel, data: mujoco.MjData, index: SceneIndex, qpos: ArmQpos
+) -> npt.NDArray[np.float64]:
+    """World direction the jaws open toward at `qpos`, levelled into the board's plane.
+
+    The moving jaw sweeps out along the gripper body's own +x, so this is the direction a
+    standoff has to run along. Levelling it keeps a standoff from changing the grasp height;
+    at a fingers-down pose the axis is horizontal to within a degree anyway. `data` is mutated.
+    """
+    data.qpos[[model.jnt_qposadr[index.arm_joint_id[n]] for n in ARM_JOINT_NAMES]] = qpos
+    mujoco.mj_kinematics(model, data)
+    body = int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, GRIPPER_BODY_NAME))
+    axis = np.array(data.xmat[body].reshape(3, 3)[:, 0], dtype=np.float64)
+    axis[2] = 0.0
+    norm = float(np.linalg.norm(axis))
+    if norm < 1e-9:
+        raise PlanInfeasible(
+            "the jaws close along the vertical at this pose, so no standoff "
+            "direction exists in the board's plane"
+        )
+    return axis / norm
+
+
 def solve_hover_pose(
     model: mujoco.MjModel,
     data: mujoco.MjData,
@@ -159,16 +205,20 @@ def solve_hover_pose(
     square: str,
     height: float,
     rng: np.random.Generator,
+    gripper_qpos: float | None = None,
 ) -> ArmQpos:
     """A collision-screened fingers-down configuration `height` above one square.
 
-    Screened the way the reference grasps are: jaws wide open, the arm's resting self-contacts
-    subtracted as baseline, and the piece on the square allowed to be touched but not
-    penetrated — with the jaws open it should not be touched at all.
+    Screened the way the reference grasps are, but at the opening the plan will actually be
+    holding: the arm's resting self-contacts subtracted as baseline, and the piece on the
+    square allowed to be touched but not penetrated — at an approach opening it should not be
+    touched at all. Screening wide open instead would test a jaw that has swung 100 mm clear of
+    everything the plan cares about.
     """
     baseline = baseline_self_pairs(model, data, index, np.random.default_rng(0))
     hands = hand_body_ids(model)
     piece_body = index.piece_body_id.get(square)
+    opening = index.gripper_joint_range[1] if gripper_qpos is None else gripper_qpos
 
     def accept(qpos: npt.NDArray[np.float64]) -> bool:
         contacts = contacts_at_pose(
@@ -178,7 +228,7 @@ def solve_hover_pose(
             qpos,
             grasped_square=square,
             baseline=baseline,
-            gripper_qpos=index.gripper_joint_range[1],
+            gripper_qpos=opening,
         )
         if not contacts.is_clear():
             return False
@@ -206,6 +256,7 @@ def plan_move(
     solver: VerticalGraspSolver,
     rng: np.random.Generator,
     solve_hover: Callable[..., ArmQpos] = solve_hover_pose,
+    jaw_axis: Callable[..., npt.NDArray[np.float64]] = closing_axis,
 ) -> Plan:
     """Solve the anchor poses for one move and lay out its waypoints.
 
@@ -216,26 +267,42 @@ def plan_move(
     board, board_pose = index.board, index.board_pose
     # A piece rests its base on the playing surface, so the height the jaws close at is the
     # same number measured from the surface or from the piece's own foot.
-    grip = grip_command(stem_radius(spec.piece_type, spec.grasp_height), index.gripper_joint_range)
-    hover_source = solve_hover(model, data, index, solver, spec.source, spec.hover_height, rng)
-    hover_target = solve_hover(model, data, index, solver, spec.target, spec.hover_height, rng)
+    radius = grip_radius(spec.piece_type, spec.grasp_height)
+    grip = grip_command(radius, index.gripper_joint_range)
+    ready = ready_command(radius, spec.standoff, index.gripper_joint_range)
+    ready_qpos = denormalize_gripper(ready, index.gripper_joint_range)
+    hover_source = solve_hover(
+        model, data, index, solver, spec.source, spec.hover_height, rng, ready_qpos
+    )
+    hover_target = solve_hover(
+        model, data, index, solver, spec.target, spec.hover_height, rng, ready_qpos
+    )
 
     source_hover_xyz = _above(board, spec.source, board_pose, spec.hover_height)
     source_grasp_xyz = _above(board, spec.source, board_pose, spec.grasp_height)
     target_hover_xyz = _above(board, spec.target, board_pose, spec.hover_height)
     target_place_xyz = _above(board, spec.target, board_pose, spec.grasp_height)
+    # The standoff runs along the jaws' own closing direction at the anchor pose, so it has to
+    # be read off that pose rather than off the board: wrist roll is free, and the direction
+    # the gripper opens toward is whatever the solver converged on.
+    source_stand_xyz = _stand_off(
+        source_grasp_xyz, jaw_axis(model, data, index, hover_source), spec.standoff
+    )
+    target_stand_xyz = _stand_off(
+        target_place_xyz, jaw_axis(model, data, index, hover_target), spec.standoff
+    )
 
     waypoints = (
-        Waypoint(Phase.SURVEY_START, spec.survey_dwell, GRIPPER_OPEN, qpos=spec.survey_qpos),
-        Waypoint(Phase.APPROACH, spec.approach_duration, GRIPPER_OPEN, qpos=hover_source),
-        Waypoint(Phase.DESCEND, spec.descend_duration, GRIPPER_OPEN, position=source_grasp_xyz),
+        Waypoint(Phase.SURVEY_START, spec.survey_dwell, ready, qpos=spec.survey_qpos),
+        Waypoint(Phase.APPROACH, spec.approach_duration, ready, qpos=hover_source),
+        Waypoint(Phase.DESCEND, spec.descend_duration, ready, position=source_stand_xyz),
         Waypoint(Phase.GRASP, spec.grasp_duration, grip, position=source_grasp_xyz),
         Waypoint(Phase.LIFT, spec.lift_duration, grip, position=source_hover_xyz),
         Waypoint(Phase.TRANSPORT, spec.transport_duration, grip, position=target_hover_xyz),
         Waypoint(Phase.PLACE, spec.place_duration, grip, position=target_place_xyz),
-        Waypoint(Phase.RELEASE, spec.release_duration, GRIPPER_OPEN, position=target_place_xyz),
-        Waypoint(Phase.RETREAT, spec.retreat_duration, GRIPPER_OPEN, position=target_hover_xyz),
-        Waypoint(Phase.SURVEY_END, spec.return_duration, GRIPPER_OPEN, qpos=spec.survey_qpos),
+        Waypoint(Phase.RELEASE, spec.release_duration, ready, position=target_stand_xyz),
+        Waypoint(Phase.RETREAT, spec.retreat_duration, ready, position=target_hover_xyz),
+        Waypoint(Phase.SURVEY_END, spec.return_duration, ready, qpos=spec.survey_qpos),
     )
     return Plan(
         spec=spec,

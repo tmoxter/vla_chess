@@ -1,22 +1,22 @@
 {
-  "abort_reason": "piece_disturbed",
+  "abort_reason": null,
   "board_pose": {
-    "x": 0.295,
+    "x": 0.3,
     "yaw": 1.5707963267948966
   },
   "control_hz": 50.0,
   "diagnostics": {
-    "control_steps": 265,
-    "max_ik_error": 6.658888314031005e-07,
-    "max_tracking_error": 0.1345331993876331,
-    "sim_steps": 2650,
-    "wall_seconds": 165.38187318202108
+    "control_steps": 805,
+    "max_ik_error": 1.8272353148533123e-06,
+    "max_tracking_error": 0.00822629078021131,
+    "sim_steps": 8050,
+    "wall_seconds": 1031.3617285150103
   },
-  "final_square": "d7",
+  "final_square": "d6",
   "fps": 10.0,
-  "frames": 53,
+  "frames": 161,
   "grasp_height": 0.025,
-  "grasped": false,
+  "grasped": true,
   "hover_height": 0.065,
   "instruction": "move the pawn from d7 to d6",
   "phase_boundaries": {
@@ -30,14 +30,38 @@
     ],
     "grasp": [
       250,
-      264
+      309
+    ],
+    "lift": [
+      310,
+      384
+    ],
+    "place": [
+      485,
+      559
+    ],
+    "release": [
+      560,
+      619
+    ],
+    "retreat": [
+      620,
+      679
+    ],
+    "survey_end": [
+      680,
+      804
     ],
     "survey_start": [
       0,
       49
+    ],
+    "transport": [
+      385,
+      484
     ]
   },
-  "placed": false,
+  "placed": true,
   "seed": 0,
   "source": "d7",
   "target": "d6"
