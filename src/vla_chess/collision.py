@@ -9,12 +9,13 @@ import mujoco
 import numpy as np
 import numpy.typing as npt
 
-from vla_chess.scene import ARM_JOINT_NAMES, GRIPPER_BODY_NAME, SceneIndex
-
-MOVING_JAW_BODY_NAME: Final = "moving_jaw_so101_v1"
-
-# The vendored asset carries each mesh twice, as a visual geom and a collision one.
-_COLLISION_GROUP: Final = 3
+from vla_chess.scene import (
+    ARM_JOINT_NAMES,
+    GRIPPER_BODY_NAME,
+    MOVING_JAW_BODY_NAME,
+    VISUAL_GROUP,
+    SceneIndex,
+)
 
 # Contacts shallower than this are treated as touching rather than penetrating: the piece
 # meshes are convex primitive stacks and the arm's collision proxies are coarse, so sub-tenth
@@ -112,12 +113,12 @@ def _primitive_clearance(
     raise ValueError(f"piece geom type {geom_type} is not one of the convex primitives")
 
 
-# MuJoCo collides meshes as convex hulls, and the fixed finger is a forked printed part whose
-# hull fills the fork — precisely the space a gripped piece has to occupy. A hull contact
-# between the hand and the piece it is closing on therefore carries no information: at the d7
-# grasp the hull reports up to 6.7 mm of penetration where the true meshes clear by 4.8 mm.
-# That is why `contacts_at_pose` forgives those contacts, and why forgiving them has to be paid
-# for with a measurement rather than left as an exemption. This is the measurement.
+# The geoms read here are the visual ones, which are the meshes as drawn. The collided hand is
+# not the drawn hand — the fixed finger is collided as per-slab hulls of its mesh
+# (`scene.FINGER_SLAB_CUTS`) and every other part as one hull — so a clearance question, which
+# asks whether the real hand would hit something, has to be asked of the drawing. It is also
+# why `contacts_at_pose` can forgive hand-vs-target hull contacts: this measures the same pair
+# without them.
 #
 # Vertices against primitives, not surface against surface: the piece is a stack of convex
 # primitives so its side is exact, while the hand contributes only its mesh vertices. A finger
@@ -137,7 +138,7 @@ def piece_clearance(
         if int(model.geom_bodyid[geom]) not in bodies:
             continue
         mesh = int(model.geom_dataid[geom])
-        if mesh < 0 or int(model.geom_group[geom]) != _COLLISION_GROUP:
+        if mesh < 0 or int(model.geom_group[geom]) != VISUAL_GROUP:
             continue
         start = int(model.mesh_vertadr[mesh])
         vertices = model.mesh_vert[start : start + int(model.mesh_vertnum[mesh])].astype(np.float64)

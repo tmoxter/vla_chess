@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
+from itertools import pairwise
 from pathlib import Path
 from typing import Final
 
@@ -96,6 +98,35 @@ DEFAULT_BOARD_YAW: Final = np.pi / 2
 SURFACE_HEIGHT: Final = TABLE_TOP_Z + 2 * BOARD_BASE_HALF_THICKNESS + SQUARE_HALF_THICKNESS
 
 GRIPPER_BODY_NAME: Final = "gripper"
+MOVING_JAW_BODY_NAME: Final = "moving_jaw_so101_v1"
+FIXED_FINGER_MESH: Final = "wrist_roll_follower_so101_v1"
+MOVING_JAW_MESH: Final = "moving_jaw_so101_v1"
+
+# The vendored asset carries each part twice: a visual geom in group 2 and a collision geom in
+# group 3, both pointing at the same mesh. Group 2 is what the renderer draws and what a
+# clearance question is asked against; group 3 is what the engine collides.
+VISUAL_GROUP: Final = 2
+COLLISION_GROUP: Final = 3
+
+# MuJoCo collides a mesh as its convex hull, and the fixed finger is an L: a wide mount plate
+# at the top, a forked finger reaching 100 mm down from its outboard edge. The hull of that L
+# fills the mouth between the two arms — which is the space a gripped piece occupies. Measured
+# at the `d7` grasp: the drawn finger stood 10.6 mm clear of the pawn while the engine reported
+# 2.0 mm of penetration and held the piece on a contact force across open air. The observation
+# is the wrist camera, so that gap is in the training pixels, and the jaw command sized against
+# the hull is an angle that grips in simulation and closes on nothing on real hardware.
+#
+# So each collision mesh is cut into slabs across the part's own long axis and each slab is
+# hulled separately: a hull per slab cannot span the mouth, because no slab reaches both arms
+# of the L. The moving jaw gets the same treatment for the same reason in a milder form — it is
+# a curved lever, and one hull over the whole curve stood 2-4 mm proud of the drawn face at
+# approach openings. The cuts are in each part's own body frame: z down the finger from a tip at
+# -104 mm, y along the jaw from a tip at -82 mm. `pixi run gripper-probe` reports what the split
+# is worth and `docs/trajectory.md` records the measurement. The visual geoms are not touched:
+# the point is to collide the hand the renderer already draws.
+FINGER_SLAB_CUTS: Final = (-0.088, -0.072, -0.056, -0.040, -0.024)
+JAW_SLAB_CUTS: Final = (-0.070, -0.054, -0.038, -0.022, -0.006)
+SLAB_OVERLAP: Final = 0.002
 
 WRIST_CAMERA_NAME: Final = "wrist"
 WRIST_CAMERA_BODY: Final = GRIPPER_BODY_NAME
@@ -445,22 +476,38 @@ def make_data(model: mujoco.MjModel, index: SceneIndex) -> mujoco.MjData:
     return data
 
 
-# Everything below describes the hand *as the physics engine collides it*, which is not the
-# hand the meshes draw. MuJoCo collides a mesh as its convex hull, and the fixed finger is a
-# forked printed part whose hull fills the fork — so its contact face stands 11.6 mm inboard of
-# the face the mesh shows. Sizing a grip off the mesh therefore commands the jaw ~12 mm past
-# where it can go: measured, the first working geometry crushed 6-8 mm into a 9 mm stem, and
-# the piece squirted out of the jaws under the lift. These constants are measured by closing on
-# a real piece at a real grasp pose and bisecting for first contact, which is the only method
-# that cannot disagree with what the simulator then does. Re-measure them if the hand's
-# collision geometry changes; `docs/trajectory.md` records the probe.
+# Everything below describes the hand *as the physics engine collides it*, measured rather than
+# read off the meshes: `pixi run gripper-probe` slides a piece across the closed jaws and
+# bisects each face for first contact, which is the only method that cannot disagree with what
+# the simulator then does. Re-measure if the hand's collision geometry changes — the numbers
+# here are from the split fixed finger (`FINGER_SLAB_CUTS`), and `docs/trajectory.md` records
+# both the run and the ones from before the split, which were 11.6 mm out.
 #
-# The mesh-derived pair these replaced (gap 15.8 mm at qpos 0, 72.9 mm/rad) is what the fork's
-# hull costs: 11.6 mm of it, plus a shallower rate, because the hull's face is not the mesh
-# face swinging on the same arc.
-FIXED_FACE_INSET: Final = 0.01159
-GAP_AT_ZERO: Final = 0.00667
-GAP_PER_RADIAN: Final = 0.0557
+# The fixed face lands within half a millimetre of `gripperframe`, which is where the vendored
+# asset draws it, so the frame the arm was shipped with is the face a piece is pushed against.
+FIXED_FACE_INSET: Final = -0.00096
+
+# Gap between the two faces as a function of the jaw's joint angle. Not a line: the moving jaw
+# bears on a piece with its pad below ~0.11 rad and with its tip above, and the two travel at
+# 78 and 56 mm/rad. A single slope through both is ~2 mm out at each end of the working range,
+# which spans grips (16-21 mm) on the lower branch and approach openings (28-33 mm) on the
+# upper one. Sampled either side of the knee and interpolated instead; the entries are the
+# probe's own output, measured with a pawn (10 mm) as the sliding piece.
+JAW_GAP_TABLE: Final = (
+    (-0.150, 0.00582),
+    (-0.100, 0.00977),
+    (-0.050, 0.01377),
+    (0.000, 0.01773),
+    (0.050, 0.02136),
+    (0.075, 0.02317),
+    (0.100, 0.02499),
+    (0.125, 0.02679),
+    (0.150, 0.02825),
+    (0.200, 0.03116),
+    (0.250, 0.03404),
+    (0.300, 0.03692),
+    (0.350, 0.03982),
+)
 
 # The fingers' own extent along the piece's axis, relative to the TCP: they reach 8 mm below it
 # and 26 mm above. A piece is gripped by whatever it presents in that band, which is why
@@ -537,9 +584,31 @@ def pinch_offset_for(radius: float) -> float:
 DEFAULT_PINCH_OFFSET: Final = FIXED_FACE_INSET + DEFAULT_GRIP_RADIUS - GRIP_SQUEEZE / 2.0
 
 
+def jaw_gap(qpos: float) -> float:
+    """Gap between the faces that collide, at gripper joint angle `qpos`."""
+    angles = [angle for angle, _ in JAW_GAP_TABLE]
+    if not angles[0] <= qpos <= angles[-1]:
+        raise ValueError(
+            f"jaw angle {qpos:.4f} rad is outside the measured range "
+            f"[{angles[0]:.3f}, {angles[-1]:.3f}]"
+        )
+    return float(np.interp(qpos, angles, [gap for _, gap in JAW_GAP_TABLE]))
+
+
 def gripper_qpos_for_gap(gap: float) -> float:
-    """Gripper joint angle at which the faces that collide stand `gap` apart."""
-    return (gap - GAP_AT_ZERO) / GAP_PER_RADIAN
+    """Gripper joint angle at which the faces that collide stand `gap` apart.
+
+    Outside the measured range this raises rather than extrapolating: the gap is only linear in
+    stretches, so a line carried past the last sample is a guess about a jaw feature nobody
+    slid a piece across.
+    """
+    gaps = [g for _, g in JAW_GAP_TABLE]
+    if not gaps[0] <= gap <= gaps[-1]:
+        raise ValueError(
+            f"a {gap * 1000:.1f} mm gap is outside the measured range "
+            f"[{gaps[0] * 1000:.1f}, {gaps[-1] * 1000:.1f}] mm"
+        )
+    return float(np.interp(gap, gaps, [angle for angle, _ in JAW_GAP_TABLE]))
 
 
 def grip_command(radius: float, joint_range: tuple[float, float]) -> float:
@@ -705,6 +774,69 @@ def _add_piece(
     return body
 
 
+@lru_cache(maxsize=4)
+def mesh_vertices(body_name: str, mesh_name: str) -> npt.NDArray[np.float64]:
+    """One collision mesh's vertices, in its own body's frame."""
+    model = mujoco.MjModel.from_xml_path(str(SO101_XML_PATH))
+    body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+    geom = next(
+        g
+        for g in range(model.ngeom)
+        if int(model.geom_bodyid[g]) == body
+        and int(model.geom_dataid[g]) >= 0
+        and int(model.geom_group[g]) == COLLISION_GROUP
+        and mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_MESH, int(model.geom_dataid[g]))
+        == mesh_name
+    )
+    mesh = int(model.geom_dataid[geom])
+    start = int(model.mesh_vertadr[mesh])
+    vertices = model.mesh_vert[start : start + int(model.mesh_vertnum[mesh])].astype(np.float64)
+    rotation = np.zeros(9)
+    mujoco.mju_quat2Mat(rotation, model.geom_quat[geom])
+    return np.asarray(model.geom_pos[geom] + vertices @ rotation.reshape(3, 3).T, dtype=np.float64)
+
+
+def _slab_collision_mesh(
+    spec: mujoco.MjSpec,
+    body_name: str,
+    mesh_name: str,
+    axis: int,
+    cuts: tuple[float, ...],
+) -> None:
+    """Replace one collision mesh with per-slab hulls of itself, cut across `axis`.
+
+    The visual geom is left alone, so nothing about what the renderer draws changes.
+    """
+    body = spec.body(body_name)
+    vendored = next(
+        geom
+        for geom in body.geoms
+        if geom.meshname == mesh_name and int(geom.group) == COLLISION_GROUP
+    )
+    vertices = mesh_vertices(body_name, mesh_name)
+    span = vertices[:, axis]
+    bounds = (float(span.min()), *cuts, float(span.max()))
+    for i, (low, high) in enumerate(pairwise(bounds)):
+        inside = vertices[(span >= low - SLAB_OVERLAP) & (span <= high + SLAB_OVERLAP)]
+        name = f"{mesh_name}_slab{i}"
+        mesh = spec.add_mesh(name=name)
+        mesh.uservert = inside.flatten().tolist()
+        body.add_geom(
+            name=name,
+            type=mujoco.mjtGeom.mjGEOM_MESH,
+            meshname=name,
+            group=COLLISION_GROUP,
+            mass=0.0,
+        )
+    spec.delete(vendored)
+
+
+def _split_hand_collision(spec: mujoco.MjSpec) -> None:
+    """Give both jaws collision geometry that follows the meshes they are drawn from."""
+    _slab_collision_mesh(spec, GRIPPER_BODY_NAME, FIXED_FINGER_MESH, 2, FINGER_SLAB_CUTS)
+    _slab_collision_mesh(spec, MOVING_JAW_BODY_NAME, MOVING_JAW_MESH, 1, JAW_SLAB_CUTS)
+
+
 def _add_pinch_site(spec: mujoco.MjSpec, offset: float) -> None:
     """Add the pinch site to the gripper body: `gripperframe` shifted along the closing axis.
 
@@ -730,6 +862,7 @@ def build_scene(desc: SceneDescription) -> tuple[mujoco.MjModel, SceneIndex]:
     spec.visual.global_.offheight = RENDER_OFFHEIGHT
     spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
     spec.option.impratio = FRICTION_IMPEDANCE_RATIO
+    _split_hand_collision(spec)
     _add_pinch_site(spec, desc.pinch_offset)
 
     worldbody = spec.worldbody

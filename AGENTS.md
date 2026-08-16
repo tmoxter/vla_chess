@@ -47,14 +47,19 @@ expected to move to see them.
   `grasp.finger_axis_site_frame`) rather than writing a fresh orientation constraint. Reaching
   the target is the easy half — screen candidate poses for collisions and restart, or the
   solver will hand back a pose that reaches the square through the arm's own body.
-- **Size anything the hand does against the hull, not the mesh.** MuJoCo collides meshes as
-  convex hulls and the fixed finger is a fork whose hull fills it, so its contact face stands
-  11.6 mm inboard of the face the mesh draws. Jaw commands, the pinch offset and the approach
-  opening all come from `scene.FIXED_FACE_INSET`, `GAP_AT_ZERO` and `GAP_PER_RADIAN`, which are
-  measured by closing on a real piece and bisecting for first contact — a grip sized off mesh
-  geometry commanded 6 mm of interference and looked correct in every render. Screening is the
-  other way round: `collision.piece_clearance` uses the true meshes, because the question there
-  is whether the real hand would hit something. See `docs/trajectory.md`.
+- **The hand is collided as slabs of its own meshes, and the two have to stay in step.** MuJoCo
+  collides a mesh as one convex hull, and the fixed finger is an L whose hull fills the mouth a
+  gripped piece occupies: the drawn finger stood 10.6 mm clear of a pawn the engine was holding,
+  so the observation showed a hand gripping nothing and the recorded jaw angle was one that grips
+  only in simulation. `scene._split_hand_collision` cuts each jaw's collision mesh across its own
+  long axis and hulls the slabs (`FINGER_SLAB_CUTS`, `JAW_SLAB_CUTS`); visual geoms are never
+  touched. Jaw commands, the pinch offset and the approach opening come from
+  `scene.FIXED_FACE_INSET` and `JAW_GAP_TABLE`, measured by `pixi run gripper-probe`, which
+  slides a piece across the jaws and bisects each face for first contact. Re-run it and re-pin
+  both if anything about the hand's collision geometry changes — it is a fixed point (the pinch
+  offset moves the pose it measures at), so iterate until it stops moving. Anything asking what
+  the real hand would hit — `collision.piece_clearance`, occlusion in `survey.framing` — reads
+  the visual geoms instead. See `docs/trajectory.md`.
 - **The jaws close on the widest thing between the fingers.** Not on whatever the TCP sits
   beside: the fingers span 8 mm below the TCP to 26 mm above it, and a pawn's head is inside
   that band and wider than its stem. Use `scene.grip_radius`.
@@ -67,8 +72,8 @@ expected to move to see them.
   by eye, and `pixi run render-reference-views` regenerates exactly what was looked at — if the
   pose ever moves, re-inspect those and get the new ones signed off too. See
   `docs/grasp-poses.md` and `docs/reference-views.md`. The d8/e8 argument for this distance was
-  made against a grasp frame since corrected, and does not hold at the current one; the board
-  has been left where the eye put it, pending that re-inspection (`docs/trajectory.md`).
+  made against a grasp frame since corrected twice, and it survives both: at the current frame
+  those two squares still solve, and the reference set's 28 of 64 loses `b5`/`g5` instead.
 
 ### Running `pixi run test-slow`
 

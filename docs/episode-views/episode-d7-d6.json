@@ -7,10 +7,10 @@
   "control_hz": 50.0,
   "diagnostics": {
     "control_steps": 805,
-    "max_ik_error": 1.8272353148533123e-06,
-    "max_tracking_error": 0.00822629078021131,
+    "max_ik_error": 2.866292529114735e-07,
+    "max_tracking_error": 0.008222145221512323,
     "sim_steps": 8050,
-    "wall_seconds": 1031.3617285150103
+    "wall_seconds": 1029.0148794678971
   },
   "final_square": "d6",
   "fps": 10.0,

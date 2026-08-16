@@ -9,8 +9,6 @@ from vla_chess.scene import (
     DEFAULT_PINCH_OFFSET,
     FIXED_FACE_INSET,
     FRICTION_IMPEDANCE_RATIO,
-    GAP_AT_ZERO,
-    GAP_PER_RADIAN,
     GRIP_SQUEEZE,
     Board,
     BoardPose,
@@ -22,6 +20,7 @@ from vla_chess.scene import (
     denormalize_gripper,
     grip_command,
     grip_radius,
+    jaw_gap,
     normalize_gripper,
     pinch_offset_for,
     ready_command,
@@ -226,7 +225,7 @@ class TestJawCommands:
         for piece_type in PieceType:
             radius = grip_radius(piece_type, GRASP_HEIGHT)
             _, ready = self.commands(piece_type)
-            gap = GAP_AT_ZERO + GAP_PER_RADIAN * denormalize_gripper(ready, self.RANGE)
+            gap = jaw_gap(denormalize_gripper(ready, self.RANGE))
             assert gap == pytest.approx(2 * radius + self.STANDOFF + APPROACH_MARGIN)
 
     def test_a_wider_piece_is_gripped_with_the_jaws_further_apart(self) -> None:

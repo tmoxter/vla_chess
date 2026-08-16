@@ -4,7 +4,7 @@
 square: the TCP on the square centre, 2.5 cm above the playing surface, fingers pointing
 straight down, and the arm clear of itself, the board and the other pieces. They exist so
 trajectory work has verified grasp endpoints to plan to, instead of re-deriving them per
-episode. 30 of the 64 squares qualify; the rest are absent rather than present-and-unusable.
+episode. 28 of the 64 squares qualify; the rest are absent rather than present-and-unusable.
 
 Regenerate with:
 
@@ -36,16 +36,21 @@ what resolves it, and the distance is squeezed from both sides:
 | 0.285 | both blocked | — | 22/24 | b5-g5 | none |
 | 0.290 | d8 blocked, e8 out of reach | — | 22/24 | b5-g5 | none |
 | 0.295 | both blocked | 64/64, 1.0% margin | 22/24 | b5-g5 | none |
-| **0.300** | **clean** | **64/64, 6.2% margin** | **24/24** | **b5-g5** | none |
+| **0.300** | **clean** | **64/64, 6.2% margin** | **24/24** | **c5-f5** | none |
 | 0.305 | clean | — | 24/24 | c5-f5 | none |
 
-Total coverage is 28/64 at every distance in that table except 0.300, which is 30/64: the two
-squares gained on rank 8 are gained outright below 0.305, and paid for by b5/g5 above it.
+Only the 0.300 row is current. The rest were solved against the grasp frame of the time, and it
+has moved twice since — out to `pinchframe`, then back in when the hand stopped being collided as
+one hull per part (`docs/trajectory.md`). Re-solved at the frame in the tree, 0.300 gives
+**28/64**: rank 5 keeps c5-f5 rather than b5-g5, which is what the row above records. What the
+distance was chosen on is unchanged — d8/e8 still solve cleanly there — so the argument below
+stands on its own evidence rather than on the count.
 
 The floor is ~0.298: below it d8/e8 come back blocked. It moved out from ~0.293 when the grasp
 frame moved from `gripperframe` to `pinchframe`, ~9 mm along the closing axis, which is what
 closed the old 0.293-0.297 window and forced the survey pose to be re-searched rather than the
-board to be nudged.
+board to be nudged. Correcting the hand's collision geometry brought the frame ~12 mm back the
+other way, which is why d8/e8 survive at this distance with room rather than by a hair.
 
 The ceiling is set by the survey pose rather than by the arm, and it moves with that pose: the
 one committed at 0.295 lost a corner at 0.297, and the pose searched at 0.300 has 6.2% of the
@@ -59,7 +64,7 @@ The cost is **d4 and e4**, which were reachable at 0.28 and now miss by 13 mm. T
 loss but a cheap one: ranks 1-4 were already almost entirely out of reach, so d4/e4 were two
 isolated squares in a half of the board the arm cannot play from anyway, traded for the two
 squares its own queen and king stand on. Ranks 6-8 — everything playing black's opening needs —
-go from 22/24 to complete. Total coverage is 30/64 either way.
+go from 22/24 to complete.
 
 Both directions are pinned in `tests/unit/test_grasp.py::TestReferenceAsset`, the gain by
 `test_the_black_queen_and_king_can_be_lifted_off_their_home_squares` and the cost by

@@ -18,6 +18,13 @@ LIMIT_MARGIN: Final = 0.05
 _ROLL_SAMPLES: Final = (0.0, np.pi / 2, np.pi)
 _SQUARE_HIT_TOLERANCE: Final = 0.004
 
+# Occlusion is a question about the camera, so the rays are cast against the groups the
+# renderer draws — the scene's own geoms and the arm's visual meshes. Casting against every
+# group instead lets the collision proxies block the view, and those are not the same solid:
+# the fixed finger is collided as hulls of its own slabs (`scene.FINGER_SLAB_CUTS`), which fill
+# the slot between its prongs that the drawn part sees through.
+_VISIBLE_GROUPS: Final = np.array([1, 1, 1, 0, 0, 0], dtype=np.uint8)
+
 
 @dataclass(frozen=True)
 class SurveyFraming:
@@ -154,7 +161,9 @@ def framing(
                 continue
             direction = target - position
             distance = float(np.linalg.norm(direction))
-            hit = mujoco.mj_ray(model, data, position, direction / distance, None, 1, -1, geom_id)
+            hit = mujoco.mj_ray(
+                model, data, position, direction / distance, _VISIBLE_GROUPS, 1, -1, geom_id
+            )
             if geom_id[0] < 0 or hit < distance - _SQUARE_HIT_TOLERANCE:
                 occluded.append(square)
 

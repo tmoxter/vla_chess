@@ -38,8 +38,10 @@ was already accepted, so it is the control — d8 and e8 should read as the same
 configuration, not as something more exotic.
 
 Signed off at x = 0.295 on 2026-08-15, together with the placement itself. **Re-rendered at
-x = 0.300 on 2026-08-15 with a re-searched survey pose and awaiting a fresh sign-off** — the
-placement changed because the grasp frame moved, so the previous sign-off does not carry over.
+x = 0.300 on 2026-08-16 and awaiting a fresh sign-off** — first because the placement moved with
+the grasp frame, then because the frame moved again when the hand stopped being collided as one
+hull per part (`docs/trajectory.md`). The board is where it was; the arm configurations reaching
+these three squares are not, so the earlier sign-off does not carry over.
 
 ## Scope
 

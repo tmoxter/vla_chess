@@ -244,11 +244,15 @@ pinch site 20 mm out from the vendored frame:
 So a grip sized off the meshes — the previous `JAW_GAP_AT_ZERO` and `JAW_GAP_PER_RADIAN` — asked
 for a 17 mm gap on an 18 mm pawn and actually commanded 11.9 mm: 6 mm of interference, resolved
 by the contact solver as a piece squeezed hard enough to squirt out sideways when anything else
-touched it. The measurement above is now what the code uses (`scene.FIXED_FACE_INSET`,
-`GAP_AT_ZERO`, `GAP_PER_RADIAN`), and it is taken the only way that cannot disagree with the
+touched it. The way the numbers are taken is the only one that cannot disagree with the
 simulator: close on a real piece at a real grasp pose, shift the piece along the closing axis and
-bisect for the first contact, once per finger. Re-measure it if the hand's collision geometry
-changes.
+bisect for the first contact, once per finger.
+
+**The column this section sizes against is superseded.** Sizing the grip against the hull made
+the pinch work and the pixels lie — the hull's face is 11.6 mm from the drawn one, so the drawn
+fingers held nothing. The hand is now collided as slabs of its own meshes, the two columns agree
+to under a millimetre, and the constants are re-measured against that; see *The hand that grips
+is not the hand that is drawn* below. What survives from here is the method, not the figures.
 
 ## The jaws bear on the head, not on the stem
 
@@ -324,25 +328,78 @@ which is the settling floor every piece shows in the first control step.
 The same plan places the piece for `b7 -> b6`, `c7 -> c6` and `e7 -> e6`, and for the seeds that
 pick different anchor poses out of the solver.
 
-## What it costs: the reference set and the board pose
+## The hand that grips is not the hand that is drawn
 
-The corrected pinch site sits ~8 mm further out than the one `assets/reference_grasps.json` was
-solved against, and reach falls off sharply in that direction. Re-solving at the corrected frame
-gives 28 of 64 squares against the committed 30, and the two it loses are `d8` and `e8` — the
-black queen and king on their home squares. Measured, and not a screening artifact: screening at
-the approach opening instead of wide open changes nothing, the offset alone does it.
+Every number above was measured against the hull, and the hull was accepted as the hand. Looking
+at the contact sheet says otherwise: through `grasp`, `lift` and `transport` the pawn rides
+against the moving jaw with visible daylight on the other side, and the fixed finger never
+touches it. Measured at the `d7` grasp, at the sized grip command:
 
-That matters beyond a count. `DEFAULT_BOARD_X` sits at 0.300 *because* d8 and e8 became liftable
-there, and that argument was made against the frame this document has just shown to be 12 mm out.
-The floor moved out once already when the grasp frame moved (0.293 -> 0.298); the same reasoning
-says it moves again now, to somewhere past the current board distance.
+| | drawn clearance to the pawn | what the engine reports |
+|---|---|---|
+| moving jaw | -0.03 mm, touching | 0.6 - 1.8 mm penetration |
+| fixed finger | **+10.63 mm** | 1.96 mm penetration |
 
-Recovering them therefore means moving the board out again and re-searching the survey pose,
-which `scene.py`'s standing rule says happens on a visual re-inspection and never on a coverage
-count alone. So the board has not been moved, `assets/reference_grasps.json` has not been
-re-solved, and this paragraph is the note that both are now waiting on that inspection. The
-episode does not depend on either: it solves its own anchor poses, at its own piece's pinch
-offset, in the scene it executes in.
+So the piece was carried by a contact force acting across a centimetre of air. That is not a
+cosmetic problem in a dataset whose observation is a camera: the wrist view is the only thing the
+policy sees, and it shows a hand gripping nothing. The recorded action is wrong in the same
+direction and for the same reason — `grip_command` was sized against `GAP_AT_ZERO`, a hull
+number, so the jaw angle in the dataset is one that grips in simulation and closes on nothing on
+a real SO-101. Pixels and actions agreed with each other and disagreed with the world, which is
+the worst version of this: nothing in the data contradicts itself.
+
+The cause is the same convex hull, seen from the other side. The fixed finger is an L — a wide
+mount plate, a forked finger reaching 100 mm down from its outboard edge — and one hull over an L
+fills the mouth between its arms. The mouth is where the piece goes. The 11.6 mm inset recorded
+above was that fill, measured and then built on.
+
+### Collide the part, not its hull
+
+`scene._split_hand_collision` cuts each jaw's collision mesh into slabs across the part's own
+long axis and hulls each slab separately (`FINGER_SLAB_CUTS`, `JAW_SLAB_CUTS`). No slab reaches
+both arms of the L, so no hull can span the mouth. Only the collision geoms change: the visual
+meshes are untouched, and the renderer draws groups 0-2 while these are group 3, so not a pixel
+of the observation comes from a proxy. Cutting finer than this buys nothing — the bulge over the
+zone a piece can occupy is already under 1.4 mm at 16 mm slabs and 1.2 mm at 6 mm ones.
+
+The moving jaw gets the same treatment for a milder version of the same fault: it is a curved
+lever, and one hull across the curve stood 2-4 mm proud of its drawn face at approach openings.
+
+What that is worth, from `pixi run gripper-probe`:
+
+| | before | after |
+|---|---|---|
+| fixed face, from `gripperframe` | 11.59 mm | -0.96 mm (drawn: -0.96 mm) |
+| gap at qpos 0 | 6.67 mm | 17.73 mm (drawn: 17.82 mm) |
+| widest opening measured, vs drawn | -3.7 mm | -0.84 mm |
+| drawn clearance at the sized grip, fixed finger | +10.63 mm | -2.00 mm |
+| drawn clearance at the sized grip, moving jaw | -0.03 mm | -1.49 mm |
+
+Both jaws now bear on the piece in the drawing, each about half the squeeze deep, and the fixed
+face lands within a millimetre of `gripperframe` — which is where the vendored asset draws it.
+The frame the arm shipped with was the fixed finger's face all along.
+
+The gap is not linear in the joint angle and never was: the moving jaw bears with its pad below
+~0.11 rad and with its tip above, at 78 and 56 mm/rad. `GAP_AT_ZERO` and `GAP_PER_RADIAN` are
+replaced by `JAW_GAP_TABLE`, sampled either side of the knee and interpolated, refusing to
+extrapolate past its ends. The measurement is a fixed point, not a reading: the pinch offset is
+derived from `FIXED_FACE_INSET`, and moving the pinch site moves the pose the probe measures at.
+Two iterations converge it to 0.01 mm.
+
+`collision.piece_clearance` now reads the visual geoms rather than the collision ones. It always
+meant "would the real hand hit this", and until the split the two were the same mesh. So does
+occlusion in `survey.framing`, which casts against the groups the renderer draws — a collision
+proxy blocking a camera ray is not an occlusion.
+
+### What it costs: the reference set, and what it settles
+
+`assets/reference_grasps.json` is re-solved at the corrected frame: 28 of 64 squares against the
+committed 30. The two lost are **`b5` and `g5`**, at the far edge of reach — and `d8`/`e8`, the
+black queen and king on their home squares, still solve. That is the question this document left
+open, answered the other way: the pinch site moved 12 mm *back* toward the wrist rather than 8 mm
+further out, because the fixed face it is measured from was never 11.6 mm inboard. `DEFAULT_BOARD_X`
+was pinned at 0.300 on d8/e8 being liftable there, and they are. The board has not moved and does
+not need to; nothing is waiting on a re-inspection.
 
 ## Wrist roll is unconstrained, and the observation shows it
 

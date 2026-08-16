@@ -69,16 +69,20 @@ back at the survey pose, no other piece moved by more than the 0.09 mm settling 
 plan works for `b7`, `c7` and `e7`. `docs/episode-views/` holds the wrist camera the dataset
 carries and a witness view that shows the piece leaving the board.
 
-Two consequences are open, and both are placement decisions rather than code:
+A tenth defect outlived that list, because the episode it produced looked right: the hand grips
+in the physics and not in the picture. MuJoCo collides each mesh as one convex hull, and the
+fixed finger's hull fills the mouth its own shape leaves open — so the engine held the pawn on a
+contact force while the drawn finger stood 10.6 mm clear of it, and the jaw angle written into
+the dataset was one that grips only in simulation. Both jaws are now collided as slabs of their
+own meshes (`scene._split_hand_collision`), measured by `pixi run gripper-probe`; the drawn
+fingers close on the piece, and the reference set is re-solved against the corrected frame at
+28 of 64 squares, losing `b5`/`g5` and keeping `d8`/`e8`. That closes the placement question
+this section used to carry: `DEFAULT_BOARD_X` is at 0.300 because the black queen and king are
+liftable there, and at the corrected frame they still are.
 
-1. **The reference set and the board pose.** The corrected pinch site sits ~8 mm further out,
-   which costs `d8` and `e8` — 28 of 64 squares against the committed 30. `DEFAULT_BOARD_X`
-   is at 0.300 *because* the black queen and king became liftable there, and that was measured
-   against the broken frame. Recovering them means moving the board out again and re-searching
-   the survey pose, which `scene.py`'s standing rule says happens on a visual re-inspection and
-   never on a coverage count alone. Until that inspection, `assets/reference_grasps.json` is
-   solved against a frame the episode pipeline no longer uses.
-2. **Transport clearance.** Hover caps near ~70 mm against a 92 mm tallest piece, so no
+One consequence is open, and it is a placement decision rather than code:
+
+1. **Transport clearance.** Hover caps near ~70 mm against a 92 mm tallest piece, so no
    transport leg near the arm clears an occupied square. This bounds which moves are generatable
    at all, and therefore dataset diversity. `d7 -> d6` works because nothing stands between the
    two squares.
