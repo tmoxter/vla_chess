@@ -71,6 +71,15 @@ class IKSolver:
     def __init__(
         self, model: mujoco.MjModel, index: SceneIndex, cfg: IKConfig | None = None
     ) -> None:
+        """Build the tasks and limits the solver reuses across every solve.
+
+        Args:
+            model: Scene model to solve in. Every dof outside the arm is frozen, so pieces
+                and the jaw stay where they are.
+            index: Name-to-id lookup for the scene, supplying the arm joints and the resting
+                configuration the posture task targets.
+            cfg: Tolerances, costs and iteration budget. Defaults are used when omitted.
+        """
         self._model = model
         self._index = index
         self._cfg = cfg if cfg is not None else IKConfig()
@@ -119,21 +128,45 @@ class IKSolver:
 
     @property
     def joint_limits(self) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-        """Lower and upper bounds of the five arm joints, in `ARM_JOINT_NAMES` order."""
+        """Report the range each arm joint may be solved within.
+
+        Returns:
+            Lower and upper bounds in radians, ordered as the arm's joint names. Both are
+            copies, so a caller may not widen the solver's limits through them.
+        """
         return self._lo.copy(), self._hi.copy()
 
     @property
     def config(self) -> IKConfig:
-        """The tolerances and costs this solver was built with."""
+        """Report the settings this solver was built with.
+
+        Returns:
+            The tolerances, costs and iteration budget in force, so a caller judging a result
+            can read the thresholds it was judged against.
+        """
         return self._cfg
 
     @property
     def resting_qpos(self) -> npt.NDArray[np.float64]:
-        """The scene's resting arm configuration, which the posture task targets."""
+        """Report the configuration the posture task pulls toward.
+
+        Returns:
+            The scene's resting arm angles in radians, ordered as the arm's joint names.
+        """
         return np.array(self._index.arm_qpos, dtype=np.float64)
 
     def fk(self, qpos: npt.ArrayLike) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-        """World position and wxyz quaternion of the gripper site at an arm configuration."""
+        """Place the gripper site for an arm configuration.
+
+        Args:
+            qpos: Arm joint angles in radians, ordered as the arm's joint names.
+
+        Returns:
+            Position in metres and orientation as a wxyz quaternion, both in the world frame.
+
+        Raises:
+            ValueError: If the configuration does not carry one angle per arm joint.
+        """
         self._configuration.update(self._full_qpos(qpos))
         transform = self._configuration.get_transform_frame_to_world(TCP_SITE_NAME, _SITE_FRAME)
         position = np.asarray(transform.translation(), dtype=np.float64)
@@ -146,8 +179,21 @@ class IKSolver:
         target_quat: npt.ArrayLike,
         q_init: npt.ArrayLike,
     ) -> IKResult:
-        """Refine `q_init` toward a gripper pose, reporting both errors whether or not it met
-        tolerance."""
+        """Refine one seed configuration toward a gripper pose.
+
+        Args:
+            target_pos: Target position of the gripper site in the world frame, in metres.
+            target_quat: Target orientation as a wxyz quaternion in the world frame.
+            q_init: Seed arm angles in radians to refine from, ordered as the arm's joint
+                names. The answer is local to this seed.
+
+        Returns:
+            The configuration reached, carrying both errors whether or not it met tolerance
+            and a `converged` flag saying whether it did.
+
+        Raises:
+            ValueError: If the seed does not carry one angle per arm joint.
+        """
         cfg = self._cfg
         self._configuration.update(self._full_qpos(q_init))
         self._frame_task.set_target(
@@ -208,9 +254,17 @@ class IKSolver:
     ) -> IKResult:
         """Solve without a seed, retrying from random configurations until one converges.
 
-        `accept` screens converged solutions for anything this solver does not model, self
-        collision above all; a rejected configuration is never returned. Returns the closest
-        attempt when nothing converges, so the caller sees how far off the target was.
+        Args:
+            target_pos: Target position of the gripper site in the world frame, in metres.
+            target_quat: Target orientation as a wxyz quaternion in the world frame.
+            rng: Source of the retry seeds, drawn uniformly within the joint limits. The
+                resting configuration is always tried first.
+            accept: Screen for converged solutions, for anything this solver does not model
+                and self collision above all. A rejected configuration is never returned.
+
+        Returns:
+            The first accepted converged solve, or the closest attempt when nothing
+            converged, so the caller sees how far off the target was.
         """
         best = None
         for attempt in range(self._cfg.restarts):
@@ -230,6 +284,18 @@ class IKSolver:
         return best
 
     def _full_qpos(self, arm_qpos: npt.ArrayLike) -> npt.NDArray[np.float64]:
+        """Widen arm angles into a whole-scene state vector.
+
+        Args:
+            arm_qpos: Arm joint angles in radians, ordered as the arm's joint names.
+
+        Returns:
+            A copy of the scene's resting state with the arm's entries replaced, leaving the
+            jaw and every piece where they rest.
+
+        Raises:
+            ValueError: If the angles do not carry one entry per arm joint.
+        """
         angles = np.asarray(arm_qpos, dtype=np.float64)
         if angles.shape != (len(ARM_JOINT_NAMES),):
             raise ValueError(
@@ -240,5 +306,6 @@ class IKSolver:
         return full
 
     def _errors(self) -> tuple[float, float]:
+        """Split the frame task's residual into position and orientation error."""
         error = self._frame_task.compute_error(self._configuration)
         return float(np.linalg.norm(error[:3])), float(np.linalg.norm(error[3:]))

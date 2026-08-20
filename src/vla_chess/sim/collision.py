@@ -42,7 +42,11 @@ class GripContacts:
     moving_jaw: bool
 
     def is_gripped(self) -> bool:
-        """Whether both jaws are on the piece, which is what separates a grip from a nudge."""
+        """Report whether the piece is held rather than merely touched.
+
+        Returns:
+            True when both jaws bear on the piece, which is what separates a grip from a nudge.
+        """
         return self.fixed_finger and self.moving_jaw
 
 
@@ -54,16 +58,27 @@ class PoseContacts:
     self_collisions: tuple[Contact, ...]
 
     def is_clear(self) -> bool:
-        """Whether the pose is free of both world contacts and self-collisions."""
+        """Report whether the configuration touches nothing.
+
+        Returns:
+            True when the pose is free of both world contacts and self-collisions.
+        """
         return not self.world and not self.self_collisions
 
 
 def robot_body_ids(model: mujoco.MjModel, index: SceneIndex) -> frozenset[int]:
-    """Every body belonging to the arm, including the fixed base the shoulder mounts on.
+    """Collect every body belonging to the arm, including the fixed base.
 
     The base matters: rooting this at the first joint's body leaves base-vs-anything looking
     like a robot-vs-world contact, which mislabels the model's own base/shoulder overlap as
     an obstacle collision.
+
+    Args:
+        model: Scene model to walk the body tree of.
+        index: Name-to-id lookup for the scene, used to find the first arm joint.
+
+    Returns:
+        Body ids of the arm's own kinematic subtree plus its parent base, never the world body.
     """
     root = int(model.jnt_bodyid[index.arm_joint_id[ARM_JOINT_NAMES[0]]])
     bodies = {root, int(model.body_parentid[root])}
@@ -79,7 +94,15 @@ def robot_body_ids(model: mujoco.MjModel, index: SceneIndex) -> frozenset[int]:
 
 
 def hand_body_ids(model: mujoco.MjModel) -> frozenset[int]:
-    """The gripper bodies allowed to touch the piece being grasped."""
+    """Collect the gripper bodies allowed to touch the piece being grasped.
+
+    Args:
+        model: Scene model to resolve the jaw body names against.
+
+    Returns:
+        Body ids of the fixed finger's carrier and the moving jaw. Empty for a model that
+        carries neither, rather than raising.
+    """
     ids = [
         int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name))
         for name in (GRIPPER_BODY_NAME, MOVING_JAW_BODY_NAME)
@@ -90,7 +113,19 @@ def hand_body_ids(model: mujoco.MjModel) -> frozenset[int]:
 def _primitive_clearance(
     points: npt.NDArray[np.float64], geom_type: int, size: npt.NDArray[np.float64]
 ) -> npt.NDArray[np.float64]:
-    """Signed distance from `points`, already in the geom's own frame, to one convex primitive."""
+    """Measure signed distance from a set of points to one convex primitive.
+
+    Args:
+        points: Query points as (n, 3), already expressed in the primitive's own frame.
+        geom_type: MuJoCo geom type; sphere, box, capsule and cylinder are supported.
+        size: The geom's size parameters, read per type as MuJoCo defines them.
+
+    Returns:
+        Distance in metres per point, negative inside the primitive and zero on its surface.
+
+    Raises:
+        ValueError: If the geom type is not one of the four convex primitives.
+    """
     if geom_type == mujoco.mjtGeom.mjGEOM_SPHERE:
         return np.asarray(np.linalg.norm(points, axis=1) - size[0], dtype=np.float64)
     if geom_type == mujoco.mjtGeom.mjGEOM_BOX:
@@ -128,9 +163,17 @@ def _primitive_clearance(
 def piece_clearance(
     model: mujoco.MjModel, data: mujoco.MjData, piece_body: int, bodies: frozenset[int]
 ) -> float:
-    """Smallest true-mesh clearance between `bodies` and one piece. Negative means interference.
+    """Measure the smallest true-mesh clearance between a set of bodies and one piece.
 
-    `data` must already carry the pose to test; this runs no kinematics of its own.
+    Args:
+        model: Scene model the geometry is read from.
+        data: State already carrying the pose to test; this runs no kinematics of its own.
+        piece_body: Body id of the piece to measure against.
+        bodies: Body ids to measure, contributing the vertices of their visual meshes only.
+
+    Returns:
+        Distance in metres from the nearest vertex to the piece's surface, negative when the
+        drawn meshes interfere. Infinity when no body carries a visual mesh.
     """
     piece_geoms = [g for g in range(model.ngeom) if int(model.geom_bodyid[g]) == piece_body]
     clearance = np.inf
@@ -153,12 +196,20 @@ def piece_clearance(
 
 
 def grip_contacts(model: mujoco.MjModel, data: mujoco.MjData, piece_body: int) -> GripContacts:
-    """Which jaws are currently in contact with `piece_body`.
+    """Report which jaws are currently in contact with one piece.
 
-    Reads the contacts already in `data`; the caller decides when the jaws are closed enough
-    for the answer to mean anything. The fixed finger rides on the `gripper` body and so is in
-    contact for reasons that have nothing to do with gripping — it is the moving jaw arriving
-    as well that makes the pair a grip.
+    The fixed finger rides on the `gripper` body and so is in contact for reasons that have
+    nothing to do with gripping — it is the moving jaw arriving as well that makes the pair
+    a grip.
+
+    Args:
+        model: Scene model the jaw bodies are resolved against.
+        data: State already carrying the contacts to read; the caller decides when the jaws
+            are closed enough for the answer to mean anything.
+        piece_body: Body id of the piece to test.
+
+    Returns:
+        A flag per jaw, counting only contacts that are touching or penetrating.
     """
     fixed = int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, GRIPPER_BODY_NAME))
     jaw = int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, MOVING_JAW_BODY_NAME))
@@ -194,11 +245,21 @@ def baseline_self_pairs(
     rng: np.random.Generator,
     samples: int = _BASELINE_SAMPLES,
 ) -> frozenset[tuple[int, int]]:
-    """Robot geom pairs that overlap in every sampled configuration.
+    """Find the robot geom pairs that overlap in every sampled configuration.
 
     The vendored SO-101 asset declares no exclude pairs and its collision proxies overlap
     where the real links do not, so a self-contact only means something if it is not one of
-    these. `data` is mutated in place.
+    these.
+
+    Args:
+        model: Scene model to sample configurations of.
+        data: State to sample in, mutated in place.
+        index: Name-to-id lookup for the scene, supplying the arm joints and resting pose.
+        rng: Source of the sampled configurations, drawn uniformly within the joint ranges.
+        samples: How many configurations to test. The resting pose is always the first.
+
+    Returns:
+        Geom id pairs, ordered as MuJoCo reported them, that penetrated in all samples.
     """
     robot = robot_body_ids(model, index)
     robot_geoms = {g for g in range(model.ngeom) if int(model.geom_bodyid[g]) in robot}
@@ -235,14 +296,26 @@ def contacts_at_pose(
     baseline: frozenset[tuple[int, int]] = frozenset(),
     gripper_qpos: float | None = None,
 ) -> PoseContacts:
-    """Penetrating contacts with the arm at `qpos`, ignoring `baseline`.
+    """Collect the penetrating contacts with the arm at one configuration.
 
-    Contacts between the hand and the piece named by `grasped_square` are forgiven, because
-    the hand collides as a convex hull that swallows whatever it grips and so reports contact
-    whether or not the geometry actually interferes. That forgiveness is only sound alongside
-    `piece_clearance`, which measures the same pair against the true meshes; screening callers
-    owe both checks. The same piece touched by any other link is not forgiven. `data` is
-    mutated in place.
+    Args:
+        model: Scene model to collide.
+        data: State to pose and collide, mutated in place.
+        index: Name-to-id lookup for the scene, supplying the arm and gripper joints.
+        qpos: Arm joint angles in radians, ordered as the arm's joint names.
+        grasped_square: Square whose piece the hand is holding, if any. Hand-vs-that-piece
+            contacts are forgiven, because the hand collides as a convex hull that swallows
+            whatever it grips and reports contact whether or not the geometry interferes.
+            That forgiveness is only sound alongside `piece_clearance`, which measures the
+            same pair against the true meshes; screening callers owe both checks. The same
+            piece touched by any other link is not forgiven.
+        baseline: Geom pairs to ignore as self-collisions, from `baseline_self_pairs`.
+        gripper_qpos: Jaw opening in radians to collide at. The state's existing opening
+            is kept when this is None.
+
+    Returns:
+        Contacts deeper than `PENETRATION_TOLERANCE`, split into robot-vs-world and
+        robot-vs-itself and named by the bodies involved.
     """
     qadr = [model.jnt_qposadr[index.arm_joint_id[n]] for n in ARM_JOINT_NAMES]
     data.qpos[qadr] = qpos
@@ -256,6 +329,7 @@ def contacts_at_pose(
     target_body = index.piece_body_id.get(grasped_square) if grasped_square else None
 
     def body_name(geom: int) -> str:
+        """Name the body a geom belongs to, falling back to its id."""
         name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, int(model.geom_bodyid[geom]))
         return name if name else f"body{int(model.geom_bodyid[geom])}"
 

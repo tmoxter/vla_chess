@@ -40,14 +40,24 @@ class JawFaces:
 
     @property
     def gap(self) -> float:
-        """Free space between the two faces."""
+        """Measure the mouth the jaws leave open.
+
+        Returns:
+            Free space in metres between the two faces.
+        """
         return self.moving - self.fixed
 
 
 def closing_axis(model: mujoco.MjModel, data: mujoco.MjData) -> npt.NDArray[np.float64]:
-    """The direction the moving jaw opens toward, levelled into the board's plane.
+    """Find the direction the moving jaw opens toward.
 
-    `data` must already carry the pose to measure at.
+    Args:
+        model: Scene model the gripper body is resolved against.
+        data: State already carrying the pose to measure at.
+
+    Returns:
+        A unit vector in the world frame, flattened into the board's plane by dropping its
+        z component.
     """
     body = int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, GRIPPER_BODY_NAME))
     axis = np.array(data.xmat[body].reshape(3, 3)[:, 0], dtype=np.float64)
@@ -63,14 +73,23 @@ def _place(
     axis: npt.NDArray[np.float64],
     offset: float,
 ) -> None:
-    """Slide the piece `offset` along the closing axis from where it started, and refresh."""
+    """Slide the piece along the closing axis and refresh the contacts.
+
+    Args:
+        model: Scene model to run kinematics and collision on.
+        data: State to move the piece in, mutated in place.
+        joint_qposadr: Address of the piece's free-joint position in the state vector.
+        home: Piece position in the world frame it is offset from, in metres.
+        axis: Unit direction to slide along, from `closing_axis`.
+        offset: Distance in metres to slide, signed along the axis.
+    """
     data.qpos[joint_qposadr : joint_qposadr + 3] = home + offset * axis
     mujoco.mj_kinematics(model, data)
     mujoco.mj_collision(model, data)
 
 
 def _hull_hit(model: mujoco.MjModel, data: mujoco.MjData, piece_body: int, body: int) -> bool:
-    """Whether the engine reports a contact between one body and the piece."""
+    """Report whether the engine collides one body with the piece."""
     for c in range(data.ncon):
         contact = data.contact[c]
         pair = {int(model.geom_bodyid[contact.geom1]), int(model.geom_bodyid[contact.geom2])}
@@ -80,7 +99,17 @@ def _hull_hit(model: mujoco.MjModel, data: mujoco.MjData, piece_body: int, body:
 
 
 def _bisect(hit: Callable[[float], bool], clear_at: float, hit_at: float) -> float:
-    """The offset where `hit` flips, bracketed by one offset that hits and one that does not."""
+    """Bisect a bracketed offset range for the point where contact begins.
+
+    Args:
+        hit: Predicate reporting whether the piece touches at a given offset.
+        clear_at: Offset in metres known not to hit; one end of the bracket.
+        hit_at: Offset in metres known to hit; the other end.
+
+    Returns:
+        The hitting offset in metres, narrowed to within `BISECTION_TOLERANCE` of the
+        boundary. Always taken from the hitting side, so the answer touches.
+    """
     while abs(hit_at - clear_at) > BISECTION_TOLERANCE:
         middle = 0.5 * (clear_at + hit_at)
         if hit(middle):
@@ -100,12 +129,29 @@ def measure_jaw_faces(
     radius: float,
     drawn: bool = False,
 ) -> JawFaces:
-    """Where each jaw's face stands, found by sliding one piece across the closed jaws.
+    """Measure where each jaw's face stands by sliding one piece across the closed jaws.
 
-    The piece is swept along the closing axis and each face is bisected for first contact, then
-    the piece's own `radius` is taken back off — so the answer is the face, not the piece.
-    `drawn` measures the meshes the renderer draws instead of the hulls the engine collides.
-    `data` is mutated.
+    The piece is swept along the closing axis and each face is bisected for first contact,
+    then the piece's own radius is taken back off — so the answer is the face, not the piece.
+
+    Args:
+        model: Scene model to pose and collide.
+        data: State to measure in, mutated in place. The piece is returned to where it
+            started before this returns.
+        index: Name-to-id lookup for the scene, supplying the joints and the piece body.
+        arm_qpos: Arm joint angles in radians, ordered as the arm's joint names.
+        gripper_qpos: Jaw opening in radians to measure at.
+        square: Square whose piece is used as the probe.
+        radius: Probe piece's radius in metres at the height the jaws meet it, subtracted so
+            the result is the face rather than the piece's centre.
+        drawn: Measure the meshes the renderer draws rather than the hulls the engine
+            collides. The two differ across the jaws, which is the point of measuring.
+
+    Returns:
+        Both faces along the closing axis, in metres from the gripper site.
+
+    Raises:
+        ValueError: If either jaw is out of the probe's reach within `SEARCH_SPAN`.
     """
     fixed = int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, GRIPPER_BODY_NAME))
     moving = int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, MOVING_JAW_BODY_NAME))
@@ -120,7 +166,10 @@ def measure_jaw_faces(
     home = np.array(data.qpos[qposadr : qposadr + 3], dtype=np.float64)
 
     def hits(body: int) -> Callable[[float], bool]:
+        """Build a predicate testing one jaw for contact at an offset."""
+
         def probe(offset: float) -> bool:
+            """Report whether the piece touches that jaw when slid to the offset."""
             _place(model, data, qposadr, home, axis, offset)
             if drawn:
                 return piece_clearance(model, data, piece_body, frozenset({body})) <= 0.0

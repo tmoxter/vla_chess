@@ -49,11 +49,21 @@ def sample_tcp_positions(
     n_samples: int,
     rng: np.random.Generator,
 ) -> npt.NDArray[np.float64]:
-    """FK-only Monte Carlo sample of gripper-site (TCP) world positions.
+    """Sample where the TCP lands over the arm's whole joint space.
 
-    Every arm joint is drawn independently and uniformly from its own range; the sampler
-    does not know about self-collision or reachability of any particular orientation, only
-    where the TCP site ends up. `data` is mutated in place (each sample calls `mj_forward`).
+    Every arm joint is drawn independently and uniformly from its own range; the sampler does
+    not know about self-collision or reachability of any particular orientation, only where
+    the TCP site ends up.
+
+    Args:
+        model: Scene model to run forward kinematics on.
+        data: State to pose, mutated in place and left at the last sample.
+        index: Name-to-id lookup for the scene, supplying the arm joints and the TCP site.
+        n_samples: How many configurations to draw and evaluate.
+        rng: Source of the sampled configurations.
+
+    Returns:
+        TCP positions in the world frame as (n_samples, 3), in metres.
     """
     ranges = [model.jnt_range[index.arm_joint_id[name]] for name in ARM_JOINT_NAMES]
     qadrs = [model.jnt_qposadr[index.arm_joint_id[name]] for name in ARM_JOINT_NAMES]
@@ -79,23 +89,49 @@ class ReachabilityReport:
 
     @property
     def reachable_count(self) -> int:
+        """Count the squares the probe marked reachable.
+
+        Returns:
+            How many of the 64 squares some sampled TCP position came near.
+        """
         return sum(self.reachable.values())
 
     @property
     def unreachable_squares(self) -> list[str]:
+        """Name the squares the probe could not place the TCP near.
+
+        Returns:
+            Their algebraic names, in ascending order.
+        """
         return sorted(sq for sq, ok in self.reachable.items() if not ok)
 
     def meets_minimum(self, minimum: int = MIN_REACHABLE_SQUARES) -> bool:
+        """Judge the probe against its acceptance floor.
+
+        Args:
+            minimum: How many squares must be reachable for the pose to pass.
+
+        Returns:
+            True when at least that many squares are reachable.
+        """
         return self.reachable_count >= minimum
 
 
 def min_square_clearance(board: Board, board_pose: BoardPose) -> float:
-    """Planar distance from the arm's mount origin to the nearest square centre.
+    """Measure how close the board's nearest square comes to the arm's mount.
 
     A lower bound on how close a standing piece can get to the arm base: below
     `MIN_SQUARE_CLEARANCE`, the base's own collision proxy (or a piece standing at that
     square) risks physical overlap regardless of what any joint-space reachability sample
     says, since FK sampling has no notion of the board's geometry at all.
+
+    Args:
+        board: Board geometry the square centres are taken from.
+        board_pose: Where that board stands in the world.
+
+    Returns:
+        Planar distance in metres from the arm's mount origin, which the asset pins at the
+        world origin, to the nearest square centre. Height is ignored.
     """
     squares_xy = np.array([board.square_to_world(sq, board_pose)[:2] for sq in board.squares()])
     return float(np.linalg.norm(squares_xy, axis=1).min())
@@ -111,6 +147,12 @@ class EnvelopePoint:
 
     @property
     def clears_base(self) -> bool:
+        """Judge this pose against the physical clearance floor.
+
+        Returns:
+            True when the nearest square stands far enough out that a piece on it cannot
+            overlap the arm base's own footprint.
+        """
         return self.clearance >= MIN_SQUARE_CLEARANCE
 
 
@@ -126,13 +168,33 @@ class EnvelopeSweepReport:
 
     @property
     def worst_reachability(self) -> EnvelopePoint:
+        """Find the sampled pose that reaches the fewest squares.
+
+        Returns:
+            That point. It is not generally the same point as `worst_clearance`; pushing the
+            board out trades one against the other.
+        """
         return min(self.points, key=lambda p: p.reachable_count)
 
     @property
     def worst_clearance(self) -> EnvelopePoint:
+        """Find the sampled pose that stands closest to the arm base.
+
+        Returns:
+            That point.
+        """
         return min(self.points, key=lambda p: p.clearance)
 
     def ok(self, minimum_reachable: int = MIN_REACHABLE_SQUARES) -> bool:
+        """Judge the whole envelope against both floors at once.
+
+        Args:
+            minimum_reachable: How many squares the weakest pose must still reach.
+
+        Returns:
+            True when the worst point on each axis passes its own floor, which is stricter
+            than any single pose passing both.
+        """
         return self.worst_reachability.reachable_count >= minimum_reachable and (
             self.worst_clearance.clears_base
         )
@@ -150,11 +212,27 @@ def sweep_envelope(
     xy_tolerance: float = DEFAULT_XY_TOLERANCE,
     z_band: tuple[float, float] = DEFAULT_Z_BAND,
 ) -> EnvelopeSweepReport:
-    """Evaluate every combination of pitch, xy offset, and yaw offset around a centre pose.
+    """Evaluate every combination of pitch, xy offset and yaw offset around a centre pose.
 
-    `tcp_positions` (from a single `sample_tcp_positions` call) is reused for every point:
-    reachability only depends on the arm's own joint-space FK, not on the board pose being
-    tested against it, so this is cheap even for a fine grid.
+    Args:
+        board: Board geometry the square centres are taken from.
+        tcp_positions: Sampled TCP positions in the world frame, in metres. One set is
+            reused for every point: reachability depends on the arm's own joint space, not
+            on the board pose being tested against it, so a fine grid stays cheap.
+        centre_x: Board centre in metres along x, before the offsets are applied.
+        centre_y: Board centre in metres along y, before the offsets are applied.
+        centre_yaw: Board yaw in radians, before the offsets are applied.
+        pitches: Square pitches in metres to test.
+        xy_offsets: Offsets in metres from the centre, swept independently along x and y, so
+            n offsets give n² placements.
+        yaws_deg: Yaw offsets in degrees from the centre yaw.
+        xy_tolerance: How near a square's centre in metres a sampled TCP position must land
+            for that square to count as reachable.
+        z_band: Lowest and highest world z in metres a sample may sit at and still count,
+            which the table top being at zero makes a height above the table.
+
+    Returns:
+        Every grid point with its reachable count and clearance, and the ranges swept.
     """
     points = []
     for pitch, dx, dy, dyaw_deg in product(pitches, xy_offsets, xy_offsets, yaws_deg):
@@ -183,8 +261,21 @@ def probe_reachability(
     xy_tolerance: float = DEFAULT_XY_TOLERANCE,
     z_band: tuple[float, float] = DEFAULT_Z_BAND,
 ) -> ReachabilityReport:
-    """Mark each square reachable if some sampled TCP position lands within `xy_tolerance`
-    of its centre while at a height within `z_band` of the table surface."""
+    """Mark each square reachable or not for one board pose.
+
+    Args:
+        board: Board geometry the square centres are taken from.
+        board_pose: Where that board stands in the world.
+        tcp_positions: Sampled TCP positions in the world frame, in metres.
+        xy_tolerance: How near a square's centre in metres a sample must land, measured in
+            the board's plane only, for that square to count as reachable.
+        z_band: Lowest and highest world z in metres a sample may sit at and still count,
+            which the table top being at zero makes a height above the table.
+
+    Returns:
+        A verdict per square alongside the parameters it was reached under, so the report
+        states what "reachable" meant for this run.
+    """
     lo_z, hi_z = z_band
     band = tcp_positions[(tcp_positions[:, 2] >= lo_z) & (tcp_positions[:, 2] <= hi_z)]
     band_xy = band[:, :2]
@@ -206,6 +297,7 @@ def probe_reachability(
 
 
 def _pose_desc(pose: BoardPose) -> str:
+    """Render a board pose as one line of table cell text."""
     return (
         f"pitch {pose.square_pitch:.3f}, centre ({pose.x:.3f}, {pose.y:.3f}), "
         f"yaw {pose.yaw:.3f} rad"
@@ -213,7 +305,14 @@ def _pose_desc(pose: BoardPose) -> str:
 
 
 def _envelope_section(envelope: EnvelopeSweepReport) -> str:
-    """The envelope-sweep section of `docs/reachability.md`."""
+    """Render the envelope sweep as its section of `docs/reachability.md`.
+
+    Args:
+        envelope: Sweep to report, whose two worst points carry the section's verdict.
+
+    Returns:
+        The section as markdown, starting at its own heading.
+    """
     worst_r = envelope.worst_reachability
     worst_c = envelope.worst_clearance
     verdict = (
@@ -268,7 +367,16 @@ ranges are kept; only draws landing in this corner are rejected.
 
 
 def reachability_markdown(report: ReachabilityReport, envelope: EnvelopeSweepReport) -> str:
-    """Render a reachability probe result as `docs/reachability.md`."""
+    """Render a reachability probe result as the body of `docs/reachability.md`.
+
+    Args:
+        report: Nominal board pose's per-square verdicts, quoted alongside the sample count
+            and tolerances they were reached under.
+        envelope: Sweep around that nominal pose, rendered as the closing section.
+
+    Returns:
+        The document as markdown.
+    """
     files = "abcdefgh"
     ranks = "12345678"
     header = "|  | " + " | ".join(files) + " |"

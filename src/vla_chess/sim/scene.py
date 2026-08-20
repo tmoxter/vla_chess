@@ -379,6 +379,11 @@ class BoardPose:
     square_pitch: float = DEFAULT_SQUARE_PITCH
 
     def __post_init__(self) -> None:
+        """Reject a board whose squares have no size.
+
+        Raises:
+            ValueError: If the square pitch is not positive.
+        """
         if self.square_pitch <= 0.0:
             raise ValueError(f"square_pitch must be positive, got {self.square_pitch}")
 
@@ -394,12 +399,25 @@ DEFAULT_BOARD_POSE: Final = BoardPose(
 
 
 def _parse_square(square: str) -> tuple[int, int]:
+    """Split an algebraic square name into zero-based file and rank indices.
+
+    Args:
+        square: Square name, e.g. "e4".
+
+    Returns:
+        File index along the board's local x axis and rank index along its local y axis,
+        both counted from a1.
+
+    Raises:
+        ValueError: If the name is not a square on an 8x8 board.
+    """
     if len(square) != 2 or square[0] not in FILES or square[1] not in RANKS:
         raise ValueError(f"not a valid square name: {square!r}")
     return FILES.index(square[0]), RANKS.index(square[1])
 
 
 def _rotate2d(v: npt.NDArray[np.float64], angle: float) -> npt.NDArray[np.float64]:
+    """Rotate a planar vector counter-clockwise by an angle in radians."""
     cos_a, sin_a = np.cos(angle), np.sin(angle)
     rotation = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
     result: npt.NDArray[np.float64] = rotation @ v
@@ -414,18 +432,44 @@ class Board:
     """
 
     def __init__(self, surface_height: float = SURFACE_HEIGHT) -> None:
+        """Fix the height every square on this board is placed at.
+
+        Args:
+            surface_height: World z in metres of the squares' top faces, which is what a
+                piece stands on and what a grasp height is measured from.
+        """
         self._surface_height = surface_height
 
     @property
     def surface_height(self) -> float:
+        """Report the height the squares' top faces sit at.
+
+        Returns:
+            World z in metres.
+        """
         return self._surface_height
 
     def squares(self) -> list[str]:
-        """All 64 square names, `"a1"` through `"h8"`."""
+        """Name every square on the board.
+
+        Returns:
+            All 64 names, "a1" through "h8", file-major.
+        """
         return [f"{f}{r}" for f in FILES for r in RANKS]
 
     def square_to_world(self, square: str, board: BoardPose) -> npt.NDArray[np.float64]:
-        """World-frame centre of `square`'s top surface under the given board pose."""
+        """Place a square's centre in the world.
+
+        Args:
+            square: Square name, e.g. "e4".
+            board: Where the board stands, supplying its centre, yaw and square pitch.
+
+        Returns:
+            Centre of that square's top surface in the world frame, in metres.
+
+        Raises:
+            ValueError: If the name is not a square on an 8x8 board.
+        """
         file_index, rank_index = _parse_square(square)
         local = np.array(
             [(file_index - 3.5) * board.square_pitch, (rank_index - 3.5) * board.square_pitch]
@@ -434,9 +478,16 @@ class Board:
         return np.array([world_xy[0], world_xy[1], self._surface_height])
 
     def world_to_square(self, xyz: npt.ArrayLike, board: BoardPose) -> str | None:
-        """The square whose centre `xyz` (or a point over it) is nearest to, in-plane.
+        """Name the square a point stands over.
 
-        Ignores the z coordinate. Returns `None` if the point falls outside the 8x8 grid.
+        Args:
+            xyz: Point in the world frame, in metres. Its z is ignored, so a point hovering
+                above a square answers the same as one on it.
+            board: Where the board stands, supplying its centre, yaw and square pitch.
+
+        Returns:
+            The square whose centre is nearest in the board's plane, or None when the point
+            falls outside the 8x8 grid.
         """
         xy = np.asarray(xyz, dtype=np.float64)[:2]
         local = _rotate2d(xy - np.array([board.x, board.y]), -board.yaw)
@@ -450,15 +501,19 @@ class Board:
 def apply_resting_pose(model: mujoco.MjModel, data: mujoco.MjData, index: SceneIndex) -> None:
     """Drive the arm to the scene's resting pose, leaving the pieces where they stand.
 
-    Takes the target from `index.arm_qpos`, so a scene built with a custom pose rests at that
-    pose rather than at the module default. Actuator targets are set alongside the joint
-    angles, so a stepped simulation holds the pose instead of drifting out of it on the first
-    step. Writes the arm's own addresses only; piece and board state are untouched, and `data`
-    is mutated in place.
+    Actuator targets are set alongside the joint angles, so a stepped simulation holds the
+    pose instead of drifting out of it on the first step.
 
-    Deliberately not routed through the model's qpos0: MuJoCo applies `qpos - qpos0` for hinge
-    joints, so seeding qpos0 with these angles would redefine them as the zero rather than move
-    the arm to them, leaving the joint values correct and the geometry wrong.
+    Deliberately not routed through the model's qpos0: MuJoCo applies `qpos - qpos0` for
+    hinge joints, so seeding qpos0 with these angles would redefine them as the zero rather
+    than move the arm to them, leaving the joint values correct and the geometry wrong.
+
+    Args:
+        model: Scene model to run forward dynamics on.
+        data: State to pose, mutated in place. Only the arm's own addresses are written;
+            piece and board state are untouched.
+        index: Name-to-id lookup for the scene, supplying the resting angles. A scene built
+            with a custom pose therefore rests at that pose, not at the module default.
     """
     for name, value in zip(ARM_JOINT_NAMES, index.arm_qpos, strict=True):
         data.qpos[model.jnt_qposadr[index.arm_joint_id[name]]] = value
@@ -467,10 +522,16 @@ def apply_resting_pose(model: mujoco.MjModel, data: mujoco.MjData, index: SceneI
 
 
 def make_data(model: mujoco.MjModel, index: SceneIndex) -> mujoco.MjData:
-    """A fresh `MjData` for a built scene, with the arm already at the resting pose.
+    """Build a fresh state for a scene, with the arm already at the resting pose.
 
-    Use this rather than `mujoco.MjData(model)` directly: a bare `MjData` starts at the arm's
-    XML home pose, which is not a pose the policy is ever meant to observe from.
+    Args:
+        model: Scene model to allocate state for.
+        index: Name-to-id lookup for the scene, supplying the resting pose.
+
+    Returns:
+        State at rest and already forward-evaluated. Use this rather than `mujoco.MjData`
+        directly: a bare state starts at the arm's XML home pose, which is not a pose the
+        policy is ever meant to observe from.
     """
     data = mujoco.MjData(model)
     apply_resting_pose(model, data, index)
@@ -539,7 +600,16 @@ FRICTION_IMPEDANCE_RATIO: Final = 10.0
 
 
 def _radius_at(geom: _PieceGeom, height: float) -> float:
-    """Radius `geom` presents at `height` above the piece's base, or 0 where it is absent."""
+    """Measure the radius one piece geom presents at a height.
+
+    Args:
+        geom: Primitive to measure, in the piece's own frame.
+        height: Height in metres above the piece's base to slice it at.
+
+    Returns:
+        Radius in metres of that slice, or zero where the primitive does not reach the
+        height. Boxes answer with their larger half-extent.
+    """
     if geom.shape == "cylinder":
         spans = geom.pos[2] - geom.size[1] <= height <= geom.pos[2] + geom.size[1]
         return geom.size[0] if spans else 0.0
@@ -558,10 +628,21 @@ def _radius_at(geom: _PieceGeom, height: float) -> float:
 
 
 def grip_radius(piece_type: PieceType, tcp_height: float) -> float:
-    """Widest radius `piece_type` presents where the fingers are, with the TCP at `tcp_height`.
+    """Measure the widest radius a piece presents where the fingers are.
 
     The jaws close on the widest thing between them, not on the part the TCP happens to sit
     beside, so this is what every jaw command and the pinch offset are sized from.
+
+    Args:
+        piece_type: Piece to measure.
+        tcp_height: Height in metres above the piece's base the TCP sits at. The fingers
+            span `FINGER_BAND` around it, and only that band is measured.
+
+    Returns:
+        Radius in metres the jaws would first bear on.
+
+    Raises:
+        ValueError: If the piece presents nothing in that band for the jaws to close on.
     """
     lo, hi = max(tcp_height + FINGER_BAND[0], 0.0), tcp_height + FINGER_BAND[1]
     # Every shape here is widest at its own centre height and narrows away from it, so the
@@ -578,7 +659,15 @@ def grip_radius(piece_type: PieceType, tcp_height: float) -> float:
 
 
 def pinch_offset_for(radius: float) -> float:
-    """Where the pinch site goes so a piece of `radius` ends up centred between the faces."""
+    """Place the pinch site for the piece the hand is built to lift.
+
+    Args:
+        radius: Radius in metres the jaws will bear on, from `grip_radius`.
+
+    Returns:
+        Offset in metres along the closing axis from the gripper frame, positioned so the
+        piece ends up centred between the faces rather than shoved against one of them.
+    """
     return FIXED_FACE_INSET + radius - GRIP_SQUEEZE / 2.0
 
 
@@ -586,7 +675,18 @@ DEFAULT_PINCH_OFFSET: Final = FIXED_FACE_INSET + DEFAULT_GRIP_RADIUS - GRIP_SQUE
 
 
 def jaw_gap(qpos: float) -> float:
-    """Gap between the faces that collide, at gripper joint angle `qpos`."""
+    """Measure how far apart the jaws stand at one joint angle.
+
+    Args:
+        qpos: Gripper joint angle in radians.
+
+    Returns:
+        Gap in metres between the faces the engine collides, interpolated within
+        `JAW_GAP_TABLE`.
+
+    Raises:
+        ValueError: If the angle is outside the measured range.
+    """
     angles = [angle for angle, _ in JAW_GAP_TABLE]
     if not angles[0] <= qpos <= angles[-1]:
         raise ValueError(
@@ -597,11 +697,18 @@ def jaw_gap(qpos: float) -> float:
 
 
 def gripper_qpos_for_gap(gap: float) -> float:
-    """Gripper joint angle at which the faces that collide stand `gap` apart.
+    """Solve for the joint angle that holds the jaws a given distance apart.
 
-    Outside the measured range this raises rather than extrapolating: the gap is only linear in
-    stretches, so a line carried past the last sample is a guess about a jaw feature nobody
-    slid a piece across.
+    Args:
+        gap: Distance in metres wanted between the faces the engine collides.
+
+    Returns:
+        Gripper joint angle in radians, interpolated within `JAW_GAP_TABLE`.
+
+    Raises:
+        ValueError: If the gap is outside the measured range. This raises rather than
+            extrapolating: the gap is only linear in stretches, so a line carried past the
+            last sample is a guess about a jaw feature nobody slid a piece across.
     """
     gaps = [g for _, g in JAW_GAP_TABLE]
     if not gaps[0] <= gap <= gaps[-1]:
@@ -613,7 +720,20 @@ def gripper_qpos_for_gap(gap: float) -> float:
 
 
 def grip_command(radius: float, joint_range: tuple[float, float]) -> float:
-    """The `[0, 100]` jaw command that closes on a piece of `radius` with a light squeeze."""
+    """Size the jaw command that grips a piece.
+
+    Args:
+        radius: Radius in metres the jaws bear on, from `grip_radius`.
+        joint_range: Lower and upper gripper joint angles in radians the command is
+            normalised against.
+
+    Returns:
+        Command on the [0, 100] closed-to-open scale, closing `GRIP_SQUEEZE` past first
+        contact rather than driving to the mechanical stop.
+
+    Raises:
+        ValueError: If that opening is outside the measured jaw range.
+    """
     return normalize_gripper(
         gripper_qpos_for_gap(2.0 * radius - GRIP_SQUEEZE),
         joint_range,
@@ -621,12 +741,25 @@ def grip_command(radius: float, joint_range: tuple[float, float]) -> float:
 
 
 def ready_command(radius: float, standoff: float, joint_range: tuple[float, float]) -> float:
-    """The `[0, 100]` jaw command the hand approaches and leaves a piece at.
+    """Size the jaw command the hand approaches and leaves a piece at.
 
-    Wide enough to swallow a piece of `radius` sitting `standoff` off the pinch axis with a
-    margin, and no wider: the jaw is a lever that reaches 100 mm past the pinch when it is
-    opened fully, which sweeps clean through whatever stands on the neighbouring square. Held
-    to this opening it reaches 34 mm, and the nearest neighbour's stem is 34 mm away.
+    Wide enough to swallow the piece with a margin, and no wider: the jaw is a lever that
+    reaches 100 mm past the pinch when it is opened fully, which sweeps clean through
+    whatever stands on the neighbouring square. Held to this opening it reaches 34 mm, and
+    the nearest neighbour's stem is 34 mm away.
+
+    Args:
+        radius: Radius in metres the jaws bear on, from `grip_radius`.
+        standoff: How far in metres the piece sits off the pinch axis on the descent, paid
+            for on the fixed side.
+        joint_range: Lower and upper gripper joint angles in radians the command is
+            normalised against.
+
+    Returns:
+        Command on the [0, 100] closed-to-open scale.
+
+    Raises:
+        ValueError: If that opening is outside the measured jaw range.
     """
     return normalize_gripper(
         gripper_qpos_for_gap(2.0 * radius + standoff + APPROACH_MARGIN),
@@ -635,13 +768,30 @@ def ready_command(radius: float, standoff: float, joint_range: tuple[float, floa
 
 
 def normalize_gripper(qpos: float, joint_range: tuple[float, float]) -> float:
-    """Map a raw gripper joint angle (radians) to the `[0, 100]` closed/open convention."""
+    """Convert a raw gripper joint angle into the command convention.
+
+    Args:
+        qpos: Gripper joint angle in radians.
+        joint_range: Lower and upper joint angles in radians the scale is anchored to.
+
+    Returns:
+        The angle on the [0, 100] closed-to-open scale, unclamped, so an angle outside the
+        range maps outside the scale.
+    """
     lo, hi = joint_range
     return (qpos - lo) / (hi - lo) * 100.0
 
 
 def denormalize_gripper(value: float, joint_range: tuple[float, float]) -> float:
-    """Map a `[0, 100]` closed/open gripper value back to a raw joint angle (radians)."""
+    """Convert a gripper command back into a raw joint angle.
+
+    Args:
+        value: Command on the [0, 100] closed-to-open scale.
+        joint_range: Lower and upper joint angles in radians the scale is anchored to.
+
+    Returns:
+        The joint angle in radians, unclamped.
+    """
     lo, hi = joint_range
     return lo + (value / 100.0) * (hi - lo)
 
@@ -657,6 +807,11 @@ class SceneDescription:
     pinch_offset: float = DEFAULT_PINCH_OFFSET
 
     def __post_init__(self) -> None:
+        """Reject a layout that stands two pieces in the same place.
+
+        Raises:
+            ValueError: If any square carries more than one piece.
+        """
         squares = [p.square for p in self.pieces]
         duplicates = sorted({s for s in squares if squares.count(s) > 1})
         if duplicates:
@@ -750,6 +905,7 @@ PIECE_GEOMS: Final[dict[PieceType, tuple[_PieceGeom, ...]]] = {
 
 
 def _yaw_quat(yaw: float) -> tuple[float, float, float, float]:
+    """Express a rotation about the world z axis as a wxyz quaternion."""
     return (float(np.cos(yaw / 2.0)), 0.0, 0.0, float(np.sin(yaw / 2.0)))
 
 
@@ -759,6 +915,17 @@ def _add_piece(
     placement: PiecePlacement,
     pos: npt.NDArray[np.float64],
 ) -> mujoco.MjsBody:
+    """Add one free-floating piece to a scene under construction.
+
+    Args:
+        parent: Body to attach the piece under.
+        name: Body name for the piece, also prefixing its geom names.
+        placement: Which piece of which colour to build.
+        pos: Where the piece's base sits in the parent's frame, in metres.
+
+    Returns:
+        The piece's body, carrying a free joint and one geom per primitive of its shape.
+    """
     body = parent.add_body(name=name, pos=list(pos))
     body.add_freejoint()
     rgba = PIECE_COLOR_RGBA[placement.color]
@@ -777,7 +944,16 @@ def _add_piece(
 
 @lru_cache(maxsize=4)
 def mesh_vertices(body_name: str, mesh_name: str) -> npt.NDArray[np.float64]:
-    """One collision mesh's vertices, in its own body's frame."""
+    """Read one collision mesh's vertices out of the vendored arm asset.
+
+    Args:
+        body_name: Body carrying the mesh.
+        mesh_name: Mesh to read, matched against that body's collision geoms.
+
+    Returns:
+        Vertices as (n, 3) in the body's own frame, in metres, with the geom's own offset
+        and rotation already applied.
+    """
     model = mujoco.MjModel.from_xml_path(str(SO101_XML_PATH))
     body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
     geom = next(
@@ -804,9 +980,19 @@ def _slab_collision_mesh(
     axis: int,
     cuts: tuple[float, ...],
 ) -> None:
-    """Replace one collision mesh with per-slab hulls of itself, cut across `axis`.
+    """Replace one collision mesh with per-slab hulls of itself.
 
-    The visual geom is left alone, so nothing about what the renderer draws changes.
+    MuJoCo collides a mesh as a single convex hull, which on these jaws fills the mouth a
+    gripped piece occupies. Cutting the mesh into slabs and hulling each one keeps the
+    collided shape close to the drawn one.
+
+    Args:
+        spec: Scene under construction, mutated in place.
+        body_name: Body carrying the mesh to replace.
+        mesh_name: Collision mesh to replace, also prefixing the slab names.
+        axis: Which of the body frame's axes to cut across, as an index.
+        cuts: Positions in metres along that axis to cut at. Slabs overlap by
+            `SLAB_OVERLAP` either side, so a vertex on a cut belongs to both.
     """
     body = spec.body(body_name)
     vendored = next(
@@ -833,16 +1019,26 @@ def _slab_collision_mesh(
 
 
 def _split_hand_collision(spec: mujoco.MjSpec) -> None:
-    """Give both jaws collision geometry that follows the meshes they are drawn from."""
+    """Give both jaws collision geometry that follows the meshes they are drawn from.
+
+    Args:
+        spec: Scene under construction, mutated in place.
+    """
     _slab_collision_mesh(spec, GRIPPER_BODY_NAME, FIXED_FINGER_MESH, 2, FINGER_SLAB_CUTS)
     _slab_collision_mesh(spec, MOVING_JAW_BODY_NAME, MOVING_JAW_MESH, 1, JAW_SLAB_CUTS)
 
 
 def _add_pinch_site(spec: mujoco.MjSpec, offset: float) -> None:
-    """Add the pinch site to the gripper body: `gripperframe` shifted along the closing axis.
+    """Add the pinch site to the gripper body, as the vendored frame shifted along the jaws.
 
-    Orientation is copied rather than chosen. The grasp solver reads the approach direction off
-    this site's own z axis, so rotating it would silently redefine what fingers-down means.
+    Orientation is copied rather than chosen. The grasp solver reads the approach direction
+    off this site's own z axis, so rotating it would silently redefine what fingers-down
+    means.
+
+    Args:
+        spec: Scene under construction, mutated in place.
+        offset: Distance in metres to shift along the closing axis, from
+            `pinch_offset_for`.
     """
     gripper = spec.body(GRIPPER_BODY_NAME)
     vendored = next(site for site in gripper.sites if site.name == GRIPPER_SITE_NAME)
@@ -857,7 +1053,18 @@ def _add_pinch_site(spec: mujoco.MjSpec, offset: float) -> None:
 
 
 def build_scene(desc: SceneDescription) -> tuple[mujoco.MjModel, SceneIndex]:
-    """Assemble the arm + table + board + pieces scene described by `desc`."""
+    """Assemble the arm, table, board and pieces into one compiled scene.
+
+    Args:
+        desc: What to build: where the board stands, which pieces are on it, where the wrist
+            camera is mounted, the arm's resting pose, and the pinch offset the hand is
+            built for. The offset must match the piece the episode lifts, since the site it
+            places is what every grasp is solved against.
+
+    Returns:
+        The compiled model and the name-to-id lookup into it. Take state from `make_data`
+        rather than building it directly, so the arm starts at rest.
+    """
     spec = mujoco.MjSpec.from_file(str(SO101_XML_PATH))
     spec.visual.global_.offwidth = RENDER_OFFWIDTH
     spec.visual.global_.offheight = RENDER_OFFHEIGHT
@@ -951,22 +1158,43 @@ def _build_scene_index(
     piece_body_names: dict[str, str],
     arm_qpos: tuple[float, float, float, float, float],
 ) -> SceneIndex:
+    """Resolve a compiled model's names into the ids the rest of the package uses.
+
+    Args:
+        model: Compiled scene to resolve names against.
+        board: Board algebra carried through onto the index.
+        board_pose: Where that board stands, carried through onto the index.
+        square_geom_names: Geom name per square, from the board's assembly.
+        piece_body_names: Body name per occupied square, from the pieces' assembly.
+        arm_qpos: Resting arm angles in radians, ordered as the arm's joint names.
+
+    Returns:
+        The lookup, holding the arm's joints and actuators, the gripper's joint and its
+        range, the TCP site, the wrist camera, and one id per square and per piece.
+    """
+
     def body_id(name: str) -> int:
+        """Resolve a body name to its id."""
         return int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name))
 
     def joint_id(name: str) -> int:
+        """Resolve a joint name to its id."""
         return int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name))
 
     def actuator_id(name: str) -> int:
+        """Resolve an actuator name to its id."""
         return int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, name))
 
     def geom_id(name: str) -> int:
+        """Resolve a geom name to its id."""
         return int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name))
 
     def site_id(name: str) -> int:
+        """Resolve a site name to its id."""
         return int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, name))
 
     def camera_id(name: str) -> int:
+        """Resolve a camera name to its id."""
         return int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, name))
 
     gripper_joint = joint_id(GRIPPER_JOINT_NAME)

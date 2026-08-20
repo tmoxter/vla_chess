@@ -31,10 +31,20 @@ class RoundTripMeasurement:
 
     @property
     def convergence_rate(self) -> float:
+        """Measure how often the solver met tolerance.
+
+        Returns:
+            Converged solves as a fraction of the cases run.
+        """
         return self.converged / self.cases
 
     def meets_criteria(self) -> bool:
-        """Whether this run clears the convergence and solve-time floors."""
+        """Judge this run against the thresholds `docs/ik.md` publishes.
+
+        Returns:
+            True when the run clears both `MIN_CONVERGENCE_RATE` and
+            `MAX_MEDIAN_SOLVE_SECONDS`.
+        """
         return (
             self.convergence_rate >= MIN_CONVERGENCE_RATE
             and self.median_seconds <= MAX_MEDIAN_SOLVE_SECONDS
@@ -52,7 +62,12 @@ class RecoveryMeasurement:
     median_restarts: float
 
     def meets_criteria(self) -> bool:
-        """Whether restarts recover every reference pose."""
+        """Judge the recovery run against the one strategy that has to work.
+
+        Returns:
+            True when restarts recover every reference pose. The seeded columns are
+            reported, not required.
+        """
         return self.from_restarts == self.total
 
 
@@ -63,8 +78,22 @@ def measure_roundtrip(
     perturbation: float = DEFAULT_SEED_PERTURBATION,
     warm_start: bool = True,
 ) -> RoundTripMeasurement:
-    """Solve back to poses generated from random configurations, seeded near the answer or,
-    when `warm_start` is false, from the resting pose."""
+    """Solve back to poses generated from random in-limit configurations.
+
+    Args:
+        solver: Solver under measurement, also supplying the joint limits the truth
+            configurations are drawn within.
+        cases: How many configurations to generate and solve back to.
+        seed: Seed for the truth configurations and their perturbations, so a run repeats.
+        perturbation: Half-width in radians of the uniform offset applied per joint to build
+            a warm seed. Ignored when starting cold.
+        warm_start: Seed each solve near its own answer. False seeds every solve from the
+            resting pose instead, which is what exposes the solver's locality.
+
+    Returns:
+        Convergence count and solve-time distribution over the run, with the worst position
+        error any single case ended on.
+    """
     lo, hi = solver.joint_limits
     rng = np.random.default_rng(seed)
     resting = solver.resting_qpos
@@ -99,7 +128,18 @@ def measure_roundtrip(
 def measure_reference_recovery(
     solver: IKSolver, seed: int = 0, perturbation: float = DEFAULT_SEED_PERTURBATION
 ) -> RecoveryMeasurement:
-    """Recover each reference grasp pose from the resting pose, from nearby, and with restarts."""
+    """Solve back to every reference grasp pose, once per seeding strategy.
+
+    Args:
+        solver: Solver under measurement, also supplying the joint limits and restart budget.
+        seed: Seed for the perturbations and restart draws, so a run repeats.
+        perturbation: Half-width in radians of the uniform offset applied per joint to build
+            the nearby seed.
+
+    Returns:
+        How many of the reference poses came back under each strategy, and the median number
+        of restarts the last of them needed.
+    """
     grasps = load_reference_grasps()
     lo, hi = solver.joint_limits
     rng = np.random.default_rng(seed)
@@ -143,7 +183,18 @@ def measure_posture_costs(
     cases: int = 200,
     seed: int = 0,
 ) -> list[tuple[float, RoundTripMeasurement]]:
-    """Round-trip behaviour at each posture task weight, which is what fixes the default."""
+    """Repeat the round trip at each posture task weight, which is what fixes the default.
+
+    Args:
+        model: Scene model to build a solver per weight in.
+        index: Name-to-id lookup for the scene.
+        costs: Posture task weights to measure, one solver each.
+        cases: How many configurations to solve back to per weight.
+        seed: Seed shared by every weight, so the runs differ only in the weight.
+
+    Returns:
+        Each weight paired with its round trip, in the order the weights were given.
+    """
     return [
         (cost, measure_roundtrip(IKSolver(model, index, IKConfig(posture_cost=cost)), cases, seed))
         for cost in costs
@@ -160,14 +211,30 @@ class IKMeasurements:
     posture: list[tuple[float, RoundTripMeasurement]]
 
     def meets_criteria(self) -> bool:
-        """Whether the warm-started round trip and the reference recovery both pass."""
+        """Judge the whole report against its published criteria.
+
+        Returns:
+            True when the warm-started round trip and the reference recovery both pass. The
+            cold round trip and the posture sweep are evidence for the defaults, not gates.
+        """
         return self.warm.meets_criteria() and self.recovery.meets_criteria()
 
 
 def measure_all(
     model: mujoco.MjModel, index: SceneIndex, cases: int = DEFAULT_ROUNDTRIP_CASES, seed: int = 0
 ) -> IKMeasurements:
-    """Run every measurement `docs/ik.md` reports."""
+    """Run every measurement `docs/ik.md` reports.
+
+    Args:
+        model: Scene model to measure in.
+        index: Name-to-id lookup for the scene.
+        cases: How many configurations the round trips solve back to. The posture sweep is
+            capped at 200 regardless, since it pays this cost once per weight.
+        seed: Seed shared by every measurement, so a run repeats.
+
+    Returns:
+        The warm and cold round trips, the reference recovery and the posture sweep.
+    """
     solver = IKSolver(model, index)
     return IKMeasurements(
         warm=measure_roundtrip(solver, cases, seed),
@@ -178,7 +245,16 @@ def measure_all(
 
 
 def ik_markdown(measurements: IKMeasurements, config: IKConfig) -> str:
-    """Render the measured IK numbers as `docs/ik.md`."""
+    """Render measured IK numbers as the body of `docs/ik.md`.
+
+    Args:
+        measurements: Numbers to report, from `measure_all`.
+        config: Settings the measurements were taken under, quoted into the method section
+            so the document states the thresholds its verdicts were reached against.
+
+    Returns:
+        The document as markdown, without a trailing newline.
+    """
     roundtrip, cold = measurements.warm, measurements.cold
     recovery, posture = measurements.recovery, measurements.posture
     lines = [

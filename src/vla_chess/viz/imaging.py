@@ -60,11 +60,17 @@ _GLYPHS: Final = {
 
 
 def write_png(path: Path, image: npt.NDArray[np.uint8]) -> None:
-    """Write an (h, w, 3) uint8 array as an RGB PNG, using only the standard library."""
+    """Write an image as an RGB PNG, using only the standard library.
+
+    Args:
+        path: Destination file, overwritten if it exists.
+        image: Pixels as (height, width, 3) in RGB order.
+    """
     height, width, _ = image.shape
     raw = b"".join(b"\x00" + image[y].tobytes() for y in range(height))
 
     def chunk(tag: bytes, payload: bytes) -> bytes:
+        """Frame a payload as a length-tag-data-CRC PNG chunk."""
         body = tag + payload
         return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body))
 
@@ -77,7 +83,16 @@ def write_png(path: Path, image: npt.NDArray[np.uint8]) -> None:
 
 
 def caption(width: int, text: str, height: int = 22) -> npt.NDArray[np.uint8]:
-    """A black strip carrying `text` in white, to sit above a row of panels."""
+    """Draw a caption bar to sit above a panel.
+
+    Args:
+        width: Bar width in pixels; matches the panel it labels.
+        text: Caption text. Characters outside the bitmap font render as spaces.
+        height: Bar height in pixels.
+
+    Returns:
+        A black strip carrying the text in white, as (height, width, 3) RGB.
+    """
     bar = np.zeros((height, width, 3), dtype=np.uint8)
     x = 4
     for character in text:
@@ -91,7 +106,20 @@ def caption(width: int, text: str, height: int = 22) -> npt.NDArray[np.uint8]:
 
 
 def downscale(image: npt.NDArray[np.uint8], factor: int) -> npt.NDArray[np.uint8]:
-    """Shrink an image by an integer factor, averaging each block."""
+    """Shrink an image by an integer factor, averaging each block.
+
+    Args:
+        image: Pixels as (height, width, 3) in RGB order.
+        factor: Side length in pixels of the block averaged into one output pixel. Rows and
+            columns past the last whole block are dropped.
+
+    Returns:
+        The averaged image, with both spatial dimensions divided by the factor. The input
+        itself when the factor is 1.
+
+    Raises:
+        ValueError: If the factor is below 1.
+    """
     if factor < 1:
         raise ValueError(f"downscale factor must be at least 1, got {factor}")
     if factor == 1:
@@ -107,7 +135,19 @@ def downscale(image: npt.NDArray[np.uint8], factor: int) -> npt.NDArray[np.uint8
 def contact_sheet(
     panels: Sequence[tuple[str, npt.NDArray[np.uint8]]], columns: int
 ) -> npt.NDArray[np.uint8]:
-    """Lay captioned panels out in a grid, padding the last row to full width."""
+    """Lay captioned panels out in a grid, padding the last row to full width.
+
+    Args:
+        panels: Caption and image pairs, placed left to right then top to bottom. All images
+            must share a shape, since the grid is stacked rather than resized.
+        columns: Panels per row. The last row is filled out with blank tiles.
+
+    Returns:
+        The assembled sheet, each panel carrying its caption bar above it.
+
+    Raises:
+        ValueError: If there are no panels, or fewer than one column.
+    """
     if not panels:
         raise ValueError("a contact sheet needs at least one panel")
     if columns < 1:

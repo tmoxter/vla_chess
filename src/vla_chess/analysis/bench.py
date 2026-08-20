@@ -24,22 +24,46 @@ _RSS_SAMPLE_INTERVAL: Final = 10
 
 
 def bench_scene_path() -> Path:
-    """Path to the chess-like scene the render budget is measured on."""
+    """Locate the scene the render budget is measured on.
+
+    Returns:
+        Path to the chess-like bench scene, resolved from the packaged asset root.
+    """
     return paths.ASSETS_DIR / "bench_scene.xml"
 
 
 def read_rss_bytes() -> int:
-    """Current resident set size of this process, in bytes."""
+    """Read this process's current memory footprint.
+
+    Returns:
+        Resident set size in bytes, covering the interpreter and every library in it rather
+        than the renderer alone.
+    """
     return _read_proc_status_kib("VmRSS:") * 1024
 
 
 def read_peak_rss_bytes() -> int:
-    """High-water mark of this process's resident set size, in bytes."""
+    """Read this process's largest memory footprint so far.
+
+    Returns:
+        High-water mark of resident set size in bytes, as the kernel has tracked it since
+        the process started.
+    """
     return _read_proc_status_kib("VmHWM:") * 1024
 
 
 def _read_proc_status_kib(field: str) -> int:
-    """Read one kibibyte-valued field out of /proc/self/status."""
+    """Read one kibibyte-valued field out of /proc/self/status.
+
+    Args:
+        field: Field name to match, including its trailing colon.
+
+    Returns:
+        The field's value in kibibytes.
+
+    Raises:
+        RuntimeError: If this kernel's status file carries no such field.
+    """
     with open("/proc/self/status") as handle:
         for line in handle:
             if line.startswith(field):
@@ -51,17 +75,27 @@ class RssTracker:
     """High-water mark of resident set size over explicitly taken samples."""
 
     def __init__(self) -> None:
+        """Start the high-water mark at the footprint the tracker is built at."""
         self._peak = read_rss_bytes()
 
     def sample(self) -> int:
-        """Take a reading and fold it into the high-water mark."""
+        """Take a reading and fold it into the high-water mark.
+
+        Returns:
+            Resident set size in bytes at this moment, not the mark.
+        """
         rss = read_rss_bytes()
         self._peak = max(self._peak, rss)
         return rss
 
     @property
     def peak(self) -> int:
-        """Largest resident set size seen so far, in bytes."""
+        """Report the mark the samples have reached.
+
+        Returns:
+            Largest resident set size in bytes across the samples taken, which misses any
+            spike between them.
+        """
         return self._peak
 
 
@@ -78,7 +112,12 @@ class HostInfo:
 
     @classmethod
     def probe(cls) -> "HostInfo":
-        """Read the current host's CPU count, memory, and mujoco version."""
+        """Read what this host and toolchain are, at the moment of the call.
+
+        Returns:
+            The host's CPU affinity count, total and available memory, MuJoCo version, GL
+            backend and a UTC timestamp, so a published sweep says what produced it.
+        """
         meminfo = _read_meminfo()
         return cls(
             cpu_count=len(_online_cpus()),
@@ -114,6 +153,11 @@ class BenchResult:
     peak_rss_bytes: int
 
     def __post_init__(self) -> None:
+        """Reject a result no throughput can be read out of.
+
+        Raises:
+            ValueError: If no frame was measured, or no render time was spent.
+        """
         if self.frames <= 0:
             raise ValueError("frames must be positive: a result needs at least one measured frame")
         if self.render_seconds <= 0.0:
@@ -121,12 +165,22 @@ class BenchResult:
 
     @property
     def render_fps(self) -> float:
-        """Observation frames per second spent in rendering alone."""
+        """Measure throughput charged for rendering alone.
+
+        Returns:
+            Complete observations per second, an observation being every camera of this
+            case rather than a single image.
+        """
         return self.frames / self.render_seconds
 
     @property
     def pipeline_fps(self) -> float:
-        """Observation frames per second including the physics stepped between frames."""
+        """Measure throughput charged for rendering and physics together.
+
+        Returns:
+            Complete observations per second including the physics stepped between frames,
+            at this benchmark's one step per frame rather than an episode's many.
+        """
         return self.frames / (self.render_seconds + self.physics_seconds)
 
 
@@ -152,15 +206,31 @@ def select_working_point(
     rss_ceiling: int = RSS_CEILING_BYTES,
     production_camera_count: int = PRODUCTION_CAMERA_COUNT,
 ) -> WorkingPoint:
-    """Evaluate the fixed target resolution (plan §0.10) at the production camera count.
+    """Evaluate the fixed target resolution at the production camera count.
 
-    Resolution is not chosen by searching for the highest fps-passing case — it is fixed at
-    `target_resolution` (512², matching SmolVLA's reference resolution) regardless of
-    throughput. RSS is still a hard, physical ceiling on this host: exceeding it raises
-    `RenderBudgetExceeded`, because there is no silent fallback available for a resource this
-    host does not have. Falling short of `min_fps` is recorded in the rationale but does not
-    raise — it is a throughput fact for Step 15's episode-count and capture-fps calibration
-    to absorb, not a reason to shrink the image.
+    Resolution is not chosen by searching for the highest fps-passing case — it is fixed
+    regardless of throughput. RSS is still a hard, physical ceiling on this host, while
+    falling short on fps is recorded rather than raised: it is a throughput fact for Step
+    15's episode-count and capture-fps calibration to absorb, not a reason to shrink the
+    image.
+
+    Args:
+        results: Sweep to select from. Cases at other camera counts are ignored.
+        target_resolution: Square edge in pixels the working point is pinned to, matching
+            SmolVLA's reference resolution.
+        min_fps: Reference throughput the measured case is reported against.
+        rss_ceiling: Hard memory ceiling in bytes for this host.
+        production_camera_count: How many cameras the production configuration renders,
+            which is the only case a working point may be read from.
+
+    Returns:
+        The target resolution's measured throughput and memory, with a rationale recording
+        whether it cleared the fps reference point.
+
+    Raises:
+        ValueError: If the sweep holds no case at that resolution and camera count.
+        RenderBudgetExceeded: If that case's peak RSS is over the ceiling. This is a hard
+            stop rather than a fallback: nothing here silently substitutes a smaller image.
     """
     candidates = [r for r in results if r.camera_count == production_camera_count]
     match = next((r for r in candidates if r.resolution == target_resolution), None)
@@ -201,8 +271,20 @@ def select_working_point(
 
 
 def bench_cameras(resolution: int, camera_count: int) -> list[CameraSpec]:
-    """Camera specs for a sweep case: the wrist camera first (the production case, §0.9
-    of the plan), then the overhead camera for diagnostic multi-camera comparison only."""
+    """Build the cameras one sweep case renders.
+
+    Args:
+        resolution: Square edge in pixels for every camera in the case.
+        camera_count: How many cameras to render. The wrist camera comes first, since it
+            alone is the production case; the overhead camera is added only to quantify
+            what a second camera costs.
+
+    Returns:
+        One spec per camera, the wrist camera mounted on the wrist body and the rest fixed.
+
+    Raises:
+        ValueError: If the count is below one or above the cameras the bench scene carries.
+    """
     if not 1 <= camera_count <= len(BENCH_CAMERA_NAMES):
         raise ValueError(f"camera_count must lie in [1, {len(BENCH_CAMERA_NAMES)}]")
     names = BENCH_CAMERA_NAMES[:camera_count]
@@ -225,10 +307,23 @@ def measure_case(
     frames: int,
     warmup: int = 5,
 ) -> BenchResult:
-    """Time `frames` stepped-and-rendered observations at one resolution and camera count.
+    """Time stepped-and-rendered observations at one resolution and camera count.
 
-    The renderer is created and closed inside this call so a sweep holds one set of GL
+    The renderer is created and closed inside this call, so a sweep holds one set of GL
     contexts at a time.
+
+    Args:
+        model: Scene model to step and render. A fresh state is built for the case.
+        resolution: Square edge in pixels for every camera.
+        camera_count: How many cameras each observation renders.
+        frames: How many measured observations to time, each one physics step and one
+            render of every camera.
+        warmup: How many observations to run untimed first, so first-render allocation does
+            not land in the measurement.
+
+    Returns:
+        The case's render and physics time and its peak memory, which is sampled every
+        tenth frame rather than continuously.
     """
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
@@ -275,7 +370,20 @@ def run_sweep(
     warmup: int = 5,
     on_result: Callable[[BenchResult], None] | None = None,
 ) -> list[BenchResult]:
-    """Measure every resolution and camera count in turn, one renderer alive at a time."""
+    """Measure every resolution and camera count in turn, one renderer alive at a time.
+
+    Args:
+        model: Scene model to step and render.
+        resolutions: Square edges in pixels to measure.
+        camera_counts: Camera counts to measure, each paired with every resolution.
+        frames: How many measured observations to time per case.
+        warmup: How many observations to run untimed before each case is timed.
+        on_result: Called with each case as it finishes, for progress output. The sweep is
+            long enough that waiting for the whole list is its own problem.
+
+    Returns:
+        Every case, resolution-major in the order the arguments gave them.
+    """
     results: list[BenchResult] = []
     for resolution in resolutions:
         for camera_count in camera_counts:
@@ -293,7 +401,18 @@ def render_budget_markdown(
     min_fps: float = MIN_CAMERA_FPS,
     rss_ceiling: int = RSS_CEILING_BYTES,
 ) -> str:
-    """Render the measured sweep and the chosen working point as `docs/render-budget.md`."""
+    """Render a measured sweep and its working point as the body of `docs/render-budget.md`.
+
+    Args:
+        results: Every measured case, sorted into the results table.
+        working_point: Evaluated target resolution, carrying the verdict and rationale.
+        host: Machine and toolchain the sweep ran on, so the numbers stay attributable.
+        min_fps: Reference throughput quoted alongside the verdict.
+        rss_ceiling: Memory ceiling in bytes quoted alongside the verdict.
+
+    Returns:
+        The document as markdown.
+    """
     rows = "\n".join(
         f"| {r.resolution} | {r.camera_count} | {r.render_fps:.2f} | {r.pipeline_fps:.2f} | "
         f"{r.render_seconds / r.frames * 1000:.1f} | {_mb(r.peak_rss_bytes)} |"

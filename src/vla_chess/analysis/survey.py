@@ -41,14 +41,29 @@ class SurveyFraming:
     horizon_tilt_deg: float
 
     def frames_whole_board(self) -> bool:
-        """Whether every square projects inside the image."""
+        """Report whether the seat sees the whole board at once.
+
+        Returns:
+            True when every square projects inside the image. Says nothing about occlusion —
+            a framed square can still be behind the hand.
+        """
         return not self.out_of_frame
 
 
 def _camera_frame(
     model: mujoco.MjModel, data: mujoco.MjData, camera: int
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-    """World position and rotation of a camera, as (pos, mat) with columns right/up/back."""
+    """Read a camera's pose out of the current state.
+
+    Args:
+        model: Scene model the camera id refers to.
+        data: State already carrying the camera placement to read.
+        camera: Camera id to read.
+
+    Returns:
+        Position in metres and rotation in the world frame, the rotation's columns being the
+        camera's right, up and backward axes.
+    """
     return data.cam_xpos[camera].astype(np.float64), data.cam_xmat[camera].reshape(3, 3).astype(
         np.float64
     )
@@ -62,8 +77,14 @@ def _apply(
 ) -> None:
     """Write an arm configuration and run kinematics for it.
 
-    Position kinematics and camera placement only: the search calls this hundreds of
-    thousands of times and never reads a force.
+    Position kinematics and camera placement only, which is all a framing question needs and
+    cheap enough to call hundreds of thousands of times.
+
+    Args:
+        model: Scene model to run kinematics on.
+        data: State to pose, mutated in place.
+        index: Name-to-id lookup for the scene, supplying the arm joints.
+        qpos: Arm joint angles in radians, ordered as the arm's joint names.
     """
     addresses = [model.jnt_qposadr[index.arm_joint_id[name]] for name in ARM_JOINT_NAMES]
     data.qpos[addresses] = qpos
@@ -77,16 +98,25 @@ def level_rolls(
     index: SceneIndex,
     qpos: npt.NDArray[np.float64],
 ) -> tuple[float, ...]:
-    """Every `wrist_roll` value that holds the camera horizon level.
+    """Solve for the wrist rolls that hold the camera horizon level.
 
     With the other four joints fixed the world z-component of the camera's right axis is
     `A cos(roll) + B sin(roll) + C`, so this fits those three coefficients from three
     evaluations and takes the roots in closed form. Sampling for level instead wastes
     essentially every draw.
 
-    Both roots are returned and the caller must choose: `wrist_roll` is not the camera's
-    optical axis, so the two level solutions do not merely mirror the image — one of them
-    swings the camera up off the board entirely. `data` is mutated in place.
+    Args:
+        model: Scene model to run kinematics on.
+        data: State to pose, mutated in place and left at the last sampled roll.
+        index: Name-to-id lookup for the scene, supplying the arm joints and wrist camera.
+        qpos: Arm joint angles in radians, ordered as the arm's joint names. The roll entry
+            is overwritten while solving and its incoming value is ignored.
+
+    Returns:
+        Both level rolls in radians, wrapped to (-pi, pi], or nothing when the horizon
+        cannot be levelled from this configuration. The caller must choose between them:
+        the wrist roll is not the camera's optical axis, so the two solutions do not merely
+        mirror the image — one of them swings the camera up off the board entirely.
     """
     tilts = []
     candidate = np.array(qpos, dtype=float)
@@ -118,13 +148,26 @@ def framing(
     qpos: npt.NDArray[np.float64],
     rays: bool = True,
 ) -> SurveyFraming:
-    """Measure how `qpos` frames the board, in projection and in occlusion.
+    """Measure how one arm configuration frames the board, in projection and in occlusion.
 
     In-frame is decided by projecting square centres through the camera's own intrinsics
-    rather than by reading pixels, so the margin is signed: how much of the half-frame is
-    left at the worst square, negative once it has left the image. Occlusion is decided by
-    ray-casting, which is what distinguishes a square the camera points at from one it can
-    actually see past its own jaws. `data` is mutated in place.
+    rather than by reading pixels. Occlusion is decided by ray-casting, which is what
+    distinguishes a square the camera points at from one it can actually see past its own
+    jaws.
+
+    Args:
+        model: Scene model to pose and cast rays against.
+        data: State to pose, mutated in place.
+        index: Name-to-id lookup for the scene, supplying the arm joints and wrist camera.
+        board: Board geometry the square centres are taken from.
+        board_pose: Where that board stands in the world.
+        qpos: Arm joint angles in radians, ordered as the arm's joint names.
+        rays: Cast the occlusion rays. Skipping them leaves `occluded` empty and `unoccluded`
+            counting merely-framed squares, at a fraction of the cost.
+
+    Returns:
+        The framing, whose worst margin is signed as the fraction of the half-frame left at
+        the tightest square and negative once that square has left the image.
     """
     _apply(model, data, index, qpos)
     camera = index.wrist_camera_id

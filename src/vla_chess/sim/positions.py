@@ -15,7 +15,12 @@ BACK_RANK: Sequence[PieceType] = (
 
 
 def starting_position() -> tuple[PiecePlacement, ...]:
-    """The 32-piece initial chess position."""
+    """Build the initial chess position.
+
+    Returns:
+        The 32 placements of the opening position, black on ranks 7 and 8 and white on
+        ranks 1 and 2, ordered file by file.
+    """
     placements = []
     for index, file in enumerate(FILES):
         placements.append(PiecePlacement(f"{file}8", BACK_RANK[index], PieceColor.BLACK))
