@@ -29,7 +29,16 @@ from vla_chess.sim.scene import (
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse the reference-grasp solver's command line."""
+    """Parse the reference-grasp solver's command line.
+
+    Args:
+        argv: Command line to parse, without the program name. `sys.argv` is read when
+            omitted.
+
+    Returns:
+        The parsed options: the board distance to solve at, the seed, where the asset goes,
+        and whether to print the result instead of writing it.
+    """
     parser = argparse.ArgumentParser(
         prog="solve-reference-grasps",
         description="Solve one fingers-down grasp pose per board square and write them to the "
@@ -51,7 +60,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Solve a vertical grasp for every square and record the ones that meet tolerance."""
+    """Solve a vertical grasp for every square and record the ones that meet tolerance.
+
+    Each square is solved twice, unscreened and then screened for collisions, so the two ways
+    a square can fail stay apart: one the arm cannot reach fingers-down at all, and one it can
+    only reach by folding through itself. Reporting both as "unreachable" would hide that.
+
+    Args:
+        argv: Command line to parse, without the program name. `sys.argv` is read when
+            omitted.
+
+    Returns:
+        Process exit status, always 0: squares with no clean grasp are reported and left out
+        of the asset rather than failing the run.
+    """
     args = parse_args(argv)
     board_pose = BoardPose(
         args.board_x,
@@ -72,9 +94,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         recorded pose is one the arm can actually hold, not merely one whose TCP lands in the
         right place. The jaws are checked wide open, the pose they have to be in on the way
         down, and the piece being picked up is exempt from the hand's own contacts.
+
+        Args:
+            square: Algebraic name of the square being solved, whose piece the hand is allowed
+                to touch.
+
+        Returns:
+            A screen the solver applies to each converged pose.
         """
 
         def accept(qpos: npt.NDArray[np.float64]) -> bool:
+            """Report whether the arm holds this pose touching nothing but the piece."""
             return contacts_at_pose(
                 model,
                 data,

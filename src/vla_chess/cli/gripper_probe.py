@@ -31,7 +31,16 @@ PROBE_PIECE = PieceType.PAWN
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse the gripper probe's command line."""
+    """Parse the gripper probe's command line.
+
+    Args:
+        argv: Command line to parse, without the program name. `sys.argv` is read when
+            omitted.
+
+    Returns:
+        The parsed options: which square to probe over, the seed the grasp is solved from, and
+        whether to sweep the jaw finely or only at the pinned table's angles.
+    """
     parser = argparse.ArgumentParser(
         prog="gripper-probe",
         description="Measure where the jaws' faces stand, both as the engine collides them and"
@@ -48,7 +57,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Report the jaw geometry the hand's grip sizing is derived from."""
+    """Report the jaw geometry the hand's grip sizing is derived from.
+
+    Measures each jaw face as the engine collides it and as the mesh draws it, then prints
+    both against the values `sim.scene` currently pins, so a drift between them is visible
+    rather than inferred.
+
+    Args:
+        argv: Command line to parse, without the program name. `sys.argv` is read when
+            omitted.
+
+    Returns:
+        Process exit status: 0 once the probe has reported, 1 if no fingers-down pose over the
+        square could be solved to probe from.
+    """
     args = parse_args(argv)
     radius = grip_radius(PROBE_PIECE, GRASP_HEIGHT)
     desc = SceneDescription(

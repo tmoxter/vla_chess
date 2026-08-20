@@ -22,6 +22,16 @@ from vla_chess.sim.scene import (
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse the survey-pose search's command line.
+
+    Args:
+        argv: Command line to parse, without the program name. `sys.argv` is read when
+            omitted.
+
+    Returns:
+        The parsed options: the board distance to search against, how many restarts to run
+        from which seed, and the pitch band and margin floor a pose has to satisfy.
+    """
     parser = argparse.ArgumentParser(
         description="Search for a birds-eye survey pose that frames the whole board.",
     )
@@ -54,10 +64,26 @@ def _best_framing(
     high: npt.NDArray[np.float64],
     rays: bool = False,
 ) -> tuple[npt.NDArray[np.float64], SurveyFraming] | None:
-    """The better of the two level-horizon rolls for one set of the other four joints.
+    """Pick the better of the two level-horizon rolls for one set of the other four joints.
 
     Both roots have to be tried: `wrist_roll` is not the camera's optical axis, so one of
     them swings the camera off the board entirely rather than merely rolling the image.
+
+    Args:
+        model: Scene model to stand the arm in.
+        data: State the candidate configurations are written into; mutated.
+        index: Name-to-id lookup for the scene, supplying the board and the camera.
+        board_pose: Placement the framing is measured against.
+        free: The four joints other than roll, in `ARM_JOINT_NAMES` order, clipped into the
+            limits before use.
+        low: Lower joint limits, already inset by the margin a pose has to keep.
+        high: Upper joint limits, likewise inset.
+        rays: Whether to cast occlusion rays, which answers how many squares the arm's own
+            body hides at the cost of a much slower measurement.
+
+    Returns:
+        The winning configuration and how it frames the board, or None if neither roll lands
+        inside the limits.
     """
     joints = np.clip(free, low[:4], high[:4])
     best: tuple[npt.NDArray[np.float64], SurveyFraming] | None = None
@@ -74,7 +100,14 @@ def _best_framing(
 def _report(
     label: str, qpos: npt.NDArray[np.float64], empty: SurveyFraming, full: SurveyFraming
 ) -> None:
-    """Print one pose, how it frames the board, and what it can see of a full board."""
+    """Print one pose, how it frames the board, and what it can see of a full board.
+
+    Args:
+        label: Name to print the pose under.
+        qpos: The configuration itself, in `ARM_JOINT_NAMES` order.
+        empty: Framing measured over an empty board, which isolates what the arm hides.
+        full: Framing measured over the starting position, which adds what the pieces hide.
+    """
     print(f"{label}: qpos {np.round(qpos, 9).tolist()}")
     print(
         f"  worst margin {empty.worst_margin * 100:+.2f}% at {empty.worst_square}, "
@@ -96,6 +129,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     inside the image, and they differ by up to 17 squares in how many the arm's own body then
     hides. Maximising margin alone picks a wide, oblique view that sees less than the pose it
     replaces.
+
+    Args:
+        argv: Command line to parse, without the program name. `sys.argv` is read when
+            omitted.
+
+    Returns:
+        Process exit status: 0 if a pose framed the whole board inside the pitch band and met
+        the margin floor, 1 if none did or the best one fell under it.
     """
     args = parse_args(argv)
     board_pose = BoardPose(
@@ -118,9 +159,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     def evaluate(
         free: npt.NDArray[np.float64], rays: bool = False
     ) -> tuple[npt.NDArray[np.float64], SurveyFraming] | None:
+        """Complete four joints into the best-framing whole configuration, if one exists."""
         return _best_framing(model, data, index, board_pose, free, low, high, rays=rays)
 
     def cost(free: npt.NDArray[np.float64]) -> float:
+        """Score a candidate, worst first: unframed by how much, then framed by what it sees."""
         found = evaluate(free)
         if found is None:
             return 50.0
@@ -136,6 +179,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return -seen / 64.0 - min(view.worst_margin, float(args.min_margin)) + penalty
 
     def describe(qpos: npt.NDArray[np.float64]) -> tuple[SurveyFraming, SurveyFraming]:
+        """Measure one pose against an empty board and against the starting position."""
         empty = framing(model, data, index, index.board, board_pose, qpos, rays=True)
         full = framing(
             full_model, full_data, full_index, full_index.board, board_pose, qpos, rays=True

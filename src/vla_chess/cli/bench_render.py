@@ -22,7 +22,16 @@ DEFAULT_OUTPUT = Path("docs/render-budget.md")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse the benchmark's command line."""
+    """Parse the benchmark's command line.
+
+    Args:
+        argv: Command line to parse, without the program name. `sys.argv` is read when
+            omitted.
+
+    Returns:
+        The parsed options: the resolutions and camera counts to sweep, how many frames to
+        measure and warm up per case, the scene to render, and where the report goes.
+    """
     parser = argparse.ArgumentParser(
         prog="bench-render",
         description="Measure osmesa render throughput and peak RSS, and record the working point.",
@@ -58,7 +67,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the sweep, report progress per case, and write the render-budget document."""
+    """Run the sweep, report progress per case, and write the render-budget document.
+
+    Args:
+        argv: Command line to parse, without the program name. `sys.argv` is read when
+            omitted.
+
+    Returns:
+        Process exit status, always 0: the sweep records what this host does rather than
+        holding it to a threshold.
+    """
     args = parse_args(argv)
     host = HostInfo.probe()
     scene = args.scene or bench_scene_path()
@@ -70,6 +88,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     model = mujoco.MjModel.from_xml_path(str(scene))
 
     def report(result: BenchResult) -> None:
+        """Print one finished case's throughput and peak memory as the sweep reaches it."""
         print(
             f"{result.resolution:>4}²  {result.camera_count} cam  "
             f"{result.render_fps:7.2f} render fps  {result.pipeline_fps:7.2f} pipeline fps  "

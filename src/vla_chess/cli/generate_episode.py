@@ -43,7 +43,18 @@ WITNESS_LOOKAT: Final = (0.30, 0.0, 0.10)
 
 
 def sheet(frames: Sequence[Frame], panels: int, columns: int, camera: str) -> np.ndarray:
-    """A contact sheet of `panels` frames spread evenly across an episode."""
+    """Lay out a sample of an episode's frames as one contact sheet.
+
+    Args:
+        frames: The episode's captured frames, in order.
+        panels: How many to show, spread evenly across the episode. A shorter episode
+            contributes every frame it has.
+        columns: How many panels per row.
+        camera: Output name of the camera to show.
+
+    Returns:
+        The sheet, each panel downscaled and captioned with its phase and timestamp.
+    """
     picks = np.unique(np.linspace(0, len(frames) - 1, num=min(panels, len(frames))).round()).astype(
         int
     )
@@ -58,7 +69,19 @@ def sheet(frames: Sequence[Frame], panels: int, columns: int, camera: str) -> np
 
 
 def write_video(path: Path, frames: Sequence[Frame], fps: float, camera: str) -> bool:
-    """Encode one camera's frames to mp4 with ffmpeg. False if ffmpeg is unavailable."""
+    """Encode one camera's frames to an mp4 with ffmpeg.
+
+    Args:
+        path: File to write.
+        frames: The episode's captured frames, in order; at least one is required.
+        fps: Playback rate to stamp on the video.
+        camera: Output name of the camera to encode.
+
+    Returns:
+        True once written. False if ffmpeg is not installed or exited non-zero, in which case
+        its stderr is printed — an absent encoder is a missing convenience, not a failed
+        episode.
+    """
     first = frames[0].images[camera]
     height, width, _ = first.shape
     command = [
@@ -97,7 +120,17 @@ def write_video(path: Path, frames: Sequence[Frame], fps: float, camera: str) ->
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse the single-episode generator's command line."""
+    """Parse the single-episode generator's command line.
+
+    Args:
+        argv: Command line to parse, without the program name. `sys.argv` is read when
+            omitted.
+
+    Returns:
+        The parsed options: which piece to move where, the capture and control rates, the
+        seed, where the output goes, and which of the video, the onlooker's view and the
+        per-frame PNGs to skip.
+    """
     parser = argparse.ArgumentParser(
         prog="generate-episode",
         description="Plan, execute and record one pick-and-place episode, and write the wrist "
@@ -125,7 +158,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Generate one episode and write its views, metadata and verdict."""
+    """Plan, execute and record one episode, and write out what it produced.
+
+    Args:
+        argv: Command line to parse, without the program name. `sys.argv` is read when
+            omitted.
+
+    Returns:
+        Process exit status: 0 if the episode both gripped the piece and left it standing on
+        its destination, 1 otherwise. The views and metadata are written either way, since a
+        failed episode is the one worth looking at.
+    """
     args = parse_args(argv)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 

@@ -11,7 +11,16 @@ DEFAULT_OUTPUT = Path("docs/ik.md")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse the IK report's command line."""
+    """Parse the IK report's command line.
+
+    Args:
+        argv: Command line to parse, without the program name. `sys.argv` is read when
+            omitted.
+
+    Returns:
+        The parsed options: how many round trips to solve, the seed to solve them from, where
+        to write the report, and whether to print it instead.
+    """
     parser = argparse.ArgumentParser(
         prog="ik-report",
         description="Measure the differential IK solver's convergence, speed, and seed"
@@ -27,7 +36,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Measure the IK solver and report convergence, timing, and seed sensitivity."""
+    """Measure the IK solver and report convergence, timing, and seed sensitivity.
+
+    Args:
+        argv: Command line to parse, without the program name. `sys.argv` is read when
+            omitted.
+
+    Returns:
+        Process exit status: 0 if the measurements meet the solver's criteria, 1 if they do
+        not — the report is written either way.
+    """
     args = parse_args(argv)
     model, index = build_scene(SceneDescription())
 

@@ -47,6 +47,7 @@ def _apply(
     qpos: Sequence[float],
     gripper: float | None = None,
 ) -> None:
+    """Stand the arm at one configuration and settle the kinematics on it."""
     for name, value in zip(ARM_JOINT_NAMES, qpos, strict=True):
         data.qpos[model.jnt_qposadr[index.arm_joint_id[name]]] = value
     if gripper is not None:
@@ -55,7 +56,15 @@ def _apply(
 
 
 def render_observation_views(board_poses: Sequence[BoardPose]) -> npt.NDArray[np.uint8]:
-    """One captioned row per board pose: the wrist camera at rest, then at the birds-eye pose."""
+    """Render what the wrist camera sees at each of several board distances.
+
+    Args:
+        board_poses: The placements to compare, one row of the image each.
+
+    Returns:
+        The rows stacked into one image: per pose, a caption naming its board distance above
+        the resting view and the birds-eye view side by side.
+    """
     rows = []
     for board_pose in board_poses:
         model, index = build_scene(
@@ -76,7 +85,23 @@ def render_observation_views(board_poses: Sequence[BoardPose]) -> npt.NDArray[np
 
 
 def render_grasp_views(board_pose: BoardPose, squares: Sequence[str]) -> npt.NDArray[np.uint8]:
-    """One captioned row per square: the reference grasp seen from the side, front and above."""
+    """Render the committed reference grasp of each square from three fixed angles.
+
+    The jaws are drawn wide open — the pose they have to be in on the way down, and the one
+    that shows whether the fingers straddle the piece rather than the square beside it.
+
+    Args:
+        board_pose: Placement the grasps are rendered against, which has to be the one they
+            were solved at for the poses to land on their squares.
+        squares: Algebraic names of the squares to show, one row of the image each.
+
+    Returns:
+        The rows stacked into one image: per square, a caption above the side, front and top
+        views side by side.
+
+    Raises:
+        SystemExit: If any named square has no reference grasp to render.
+    """
     model, index = build_scene(SceneDescription(board_pose=board_pose, pieces=starting_position()))
     data = make_data(model, index)
     grasps = load_reference_grasps()
@@ -100,7 +125,16 @@ def render_grasp_views(board_pose: BoardPose, squares: Sequence[str]) -> npt.NDA
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse the reference-view renderer's command line."""
+    """Parse the reference-view renderer's command line.
+
+    Args:
+        argv: Command line to parse, without the program name. `sys.argv` is read when
+            omitted.
+
+    Returns:
+        The parsed options: where to write the images, which board distances to stack for
+        comparison, and which squares' grasps to show.
+    """
     parser = argparse.ArgumentParser(
         prog="render-reference-views",
         description="Re-render the committed visual reference views of the scene's board pose "
@@ -120,7 +154,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Render both reference images and write them into the output directory."""
+    """Render both reference images and write them into the output directory.
+
+    Args:
+        argv: Command line to parse, without the program name. `sys.argv` is read when
+            omitted.
+
+    Returns:
+        Process exit status, always 0: these images are regenerated to be looked at, not
+        checked against a threshold.
+    """
     args = parse_args(argv)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 

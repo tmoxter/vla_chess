@@ -27,7 +27,16 @@ ENVELOPE_YAW_STEPS = (-1.0, 0.0, 1.0)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse the reachability probe's command line."""
+    """Parse the reachability probe's command line.
+
+    Args:
+        argv: Command line to parse, without the program name. `sys.argv` is read when
+            omitted.
+
+    Returns:
+        The parsed options: how many configurations to sample, how close a sample must land to
+        count as reaching a square, the seed, and where the report goes.
+    """
     parser = argparse.ArgumentParser(
         prog="reachability-probe",
         description="Coarse FK-only sweep of which board squares the arm can reach near table"
@@ -44,8 +53,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Sample the arm's forward kinematics and report per-square coarse reachability, both
-    for the nominal board pose and worst-case across Step 4's randomization envelope."""
+    """Report which board squares the arm can reach, nominally and across the envelope.
+
+    Forward kinematics only, so this says where the TCP can be put, not that it can be put
+    there fingers-down or without collision.
+
+    Args:
+        argv: Command line to parse, without the program name. `sys.argv` is read when
+            omitted.
+
+    Returns:
+        Process exit status: 0 if the nominal board pose clears the minimum square count, 1 if
+        it does not. The envelope's worst corner is reported but does not gate — Step 4 handles
+        that per-episode by reject-and-resample.
+    """
     args = parse_args(argv)
     desc = SceneDescription()
     model, index = build_scene(desc)
