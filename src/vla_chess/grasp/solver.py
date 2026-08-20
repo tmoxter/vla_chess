@@ -83,18 +83,32 @@ class GraspPose:
     approach_deg: float
 
     def is_within_tolerance(self) -> bool:
-        """Whether this pose meets the module's TCP and approach-angle thresholds."""
+        """Report whether this pose is close enough to grip the square.
+
+        Returns:
+            True when the TCP error and the approach angle both sit inside the module's
+            acceptance thresholds.
+        """
         return self.tcp_error <= MAX_TCP_ERROR and self.approach_deg <= MAX_APPROACH_DEG
 
 
 def finger_axis_site_frame(
     model: mujoco.MjModel, data: mujoco.MjData, index: SceneIndex
 ) -> npt.NDArray[np.float64]:
-    """Unit vector, in the TCP site's own frame, along which the fingers stick out.
+    """Measure the direction the fingers stick out in, in the TCP site's own frame.
 
     Worth measuring rather than assuming: it is very nearly the site's local x, so code that
     reasons about approach direction via the site's z axis constrains the gripper's roll
     instead of its approach, and selects side approaches while reporting them as top-down.
+
+    Args:
+        model: Scene model carrying the gripper body and the TCP site.
+        data: State forward kinematics is run on; mutated.
+        index: Name-to-id lookup for the scene, supplying the TCP site.
+
+    Returns:
+        Unit vector in the site's own frame, pointing from the gripper body out along the
+        fingers.
     """
     mujoco.mj_kinematics(model, data)
     body_id = int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, GRIPPER_BODY_NAME))
@@ -105,6 +119,7 @@ def finger_axis_site_frame(
 
 
 def _arm_addresses(model: mujoco.MjModel, index: SceneIndex) -> npt.NDArray[np.int64]:
+    """Locate the five arm joints in the model's qpos vector, in `ARM_JOINT_NAMES` order."""
     return np.array(
         [model.jnt_qposadr[index.arm_joint_id[name]] for name in ARM_JOINT_NAMES], dtype=np.int64
     )
@@ -113,7 +128,15 @@ def _arm_addresses(model: mujoco.MjModel, index: SceneIndex) -> npt.NDArray[np.i
 def joint_limits(
     model: mujoco.MjModel, index: SceneIndex
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-    """Lower and upper bounds of the five arm joints, in `ARM_JOINT_NAMES` order."""
+    """Read the travel limits of the five arm joints.
+
+    Args:
+        model: Scene model carrying the joint ranges.
+        index: Name-to-id lookup for the scene, supplying the arm joints.
+
+    Returns:
+        Lower and upper bounds in radians, each in `ARM_JOINT_NAMES` order.
+    """
     ids = [index.arm_joint_id[name] for name in ARM_JOINT_NAMES]
     lo = np.array([model.jnt_range[j][0] for j in ids], dtype=np.float64)
     hi = np.array([model.jnt_range[j][1] for j in ids], dtype=np.float64)
@@ -132,6 +155,14 @@ class VerticalGraspSolver:
     """
 
     def __init__(self, model: mujoco.MjModel, data: mujoco.MjData, index: SceneIndex) -> None:
+        """Bind the solver to one model and measure the hand it will be solving for.
+
+        Args:
+            model: Scene model to solve in.
+            data: State every solve writes joint angles into and runs kinematics on; mutated.
+            index: Name-to-id lookup for the scene, supplying the arm joints, the TCP site and
+                the resting configuration the first seed is taken from.
+        """
         self._model = model
         self._data = data
         self._index = index
@@ -142,22 +173,45 @@ class VerticalGraspSolver:
 
     @property
     def finger_axis(self) -> npt.NDArray[np.float64]:
-        """The finger axis in the TCP site's frame, as measured from this model."""
+        """Report the finger axis measured from this model.
+
+        Returns:
+            Unit vector in the TCP site's frame, along which the fingers stick out.
+        """
         return self._finger_axis
 
     def forward(self, qpos: npt.NDArray[np.float64]) -> None:
-        """Write an arm configuration into `data` and run forward kinematics."""
+        """Write an arm configuration into the bound state and run forward kinematics.
+
+        Args:
+            qpos: Arm configuration in `ARM_JOINT_NAMES` order, radians.
+        """
         self._data.qpos[self._qadr] = qpos
         mujoco.mj_kinematics(self._model, self._data)
 
     def approach_axis(self) -> npt.NDArray[np.float64]:
-        """The current world-frame direction the fingers point in."""
+        """Read the direction the fingers point in at the configuration last written.
+
+        Returns:
+            Unit vector in the world frame.
+        """
         rotation = self._data.site_xmat[self._index.tcp_site_id].reshape(3, 3)
         return np.asarray(rotation @ self._finger_axis, dtype=np.float64)
 
     def _residual(
         self, qpos: npt.NDArray[np.float64], target: npt.NDArray[np.float64], weight: float
     ) -> npt.NDArray[np.float64]:
+        """Measure how far one configuration is from gripping a point fingers-down.
+
+        Args:
+            qpos: Arm configuration to evaluate, in `ARM_JOINT_NAMES` order.
+            target: World point the TCP should sit at, metres.
+            weight: How hard the approach-axis error counts against the position error.
+
+        Returns:
+            Six residuals: the TCP's offset from `target`, then the weighted difference
+            between the approach axis and straight down.
+        """
         self.forward(qpos)
         position = self._data.site_xpos[self._index.tcp_site_id] - target
         return np.concatenate([position, weight * (self.approach_axis() - self._down)])
@@ -165,6 +219,21 @@ class VerticalGraspSolver:
     def _refine(
         self, seed: npt.NDArray[np.float64], target: npt.NDArray[np.float64], weight: float
     ) -> npt.NDArray[np.float64]:
+        """Descend from one seed to the nearest configuration that grips `target` from above.
+
+        Damped least squares on a finite-difference Jacobian, stopping early once the residual
+        stops moving. Every iterate is clipped into the joint limits, so a seed outside them
+        still yields a reachable configuration.
+
+        Args:
+            seed: Arm configuration to start from, in `ARM_JOINT_NAMES` order.
+            target: World point the TCP should sit at, metres.
+            weight: How hard the approach-axis error counts against the position error.
+
+        Returns:
+            The configuration converged on, which meets no tolerance in particular — how close
+            it lands is for the caller to measure.
+        """
         qpos = np.clip(seed, self._lo, self._hi)
         previous = np.inf
         for _ in range(_IK_ITERATIONS):
@@ -189,13 +258,19 @@ class VerticalGraspSolver:
         return qpos
 
     def free_margin(self, qpos: npt.NDArray[np.float64]) -> float:
-        """How far the roll joint stands off its own limit, in radians.
+        """Measure how far the roll joint stands off its own limit.
 
         Only that joint: it is the one the residual leaves free, so where it sits is the
         solver's choice and every value it takes has a neighbour a degree away that grasps the
         square just as well. The other four are pinned by the target, and near a stop is often
         the only place they can be — at a fingers-down pose over the arm's home ranks wrist_flex
         runs within 1.5 degrees of its limit whatever else is done.
+
+        Args:
+            qpos: Arm configuration to measure, in `ARM_JOINT_NAMES` order.
+
+        Returns:
+            Radians from the roll joint to the nearer of its two stops.
         """
         roll = float(np.asarray(qpos, dtype=np.float64)[_ROLL])
         return min(roll - float(self._lo[_ROLL]), float(self._hi[_ROLL]) - roll)
@@ -203,11 +278,19 @@ class VerticalGraspSolver:
     def travel_cost(
         self, qpos: npt.NDArray[np.float64], prefer: npt.NDArray[np.float64]
     ) -> tuple[int, float, float]:
-        """Rank of one solved pose against the configuration the arm is coming from.
+        """Rank one solved pose against the configuration the arm is coming from.
 
         Poses on the roll stop sort behind poses off it, then the joint that turns furthest
         decides, then the total. The widest single turn leads because a leg is given a fixed
         duration: it is that joint that sets how fast the arm has to move to hold the schedule.
+
+        Args:
+            qpos: Solved arm configuration to rank, in `ARM_JOINT_NAMES` order.
+            prefer: Configuration the arm is coming from, in the same order.
+
+        Returns:
+            Sort key, cheapest first: whether roll is clamped against a stop, the widest single
+            joint turn in radians, then the sum over all five.
         """
         delta = np.abs(qpos - prefer)
         clamped = int(self.free_margin(qpos) < MIN_LIMIT_MARGIN)
@@ -216,7 +299,15 @@ class VerticalGraspSolver:
     def measure(
         self, qpos: npt.NDArray[np.float64], target: npt.NDArray[np.float64]
     ) -> tuple[float, float]:
-        """TCP distance to `target` (m) and approach angle off vertical (deg) at `qpos`."""
+        """Measure how well one configuration grips a target from above.
+
+        Args:
+            qpos: Arm configuration to evaluate, in `ARM_JOINT_NAMES` order.
+            target: World point the TCP should sit at, metres.
+
+        Returns:
+            TCP distance to `target` in metres, and approach angle off vertical in degrees.
+        """
         self.forward(qpos)
         error = float(np.linalg.norm(self._data.site_xpos[self._index.tcp_site_id] - target))
         cosine = float(np.clip(self.approach_axis() @ self._down, -1.0, 1.0))
@@ -230,23 +321,32 @@ class VerticalGraspSolver:
         accept: Callable[[npt.NDArray[np.float64]], bool] | None = None,
         prefer: Sequence[float] | None = None,
     ) -> tuple[npt.NDArray[np.float64], float, float]:
-        """Best configuration found for a world-frame target, with its error and approach angle.
+        """Search for the configuration that best grips a world-frame target from above.
 
         Seeded first from the resting pose, then from random configurations; returns the best
         attempt whether or not it meets tolerance, so callers can see how far off it was.
 
-        `accept` screens converged, in-tolerance poses for anything this solver does not model —
-        self-collision above all. Restarting is what makes it useful: without it the search
-        stops at the first pose that reaches the target, which for squares close to the arm is
-        routinely one the arm has folded through itself to hold. A rejected pose is never
-        returned, so a square with no acceptable solution reports the closest *unacceptable*
-        one's error rather than silently offering a pose the caller already refused.
+        Args:
+            target: World point the TCP should sit at, metres.
+            rng: Source of the random restart seeds.
+            weight: How hard the approach-axis error counts against the position error.
+            accept: Screen applied to converged, in-tolerance poses, for anything this solver
+                does not model — self-collision above all. Restarting is what makes it useful:
+                without it the search stops at the first pose that reaches the target, which
+                for squares close to the arm is routinely one the arm has folded through itself
+                to hold. A rejected pose is never returned, so a square with no acceptable
+                solution reports the closest *unacceptable* one's error rather than silently
+                offering a pose the caller already refused.
+            prefer: Configuration the arm is coming from. The fingers-down constraint leaves
+                roll free, so a square has a continuum of solutions and every one of them
+                reaches it equally well; without a preference the first acceptable one wins,
+                which is a coin toss between poses a quarter-turn apart. Given one, every
+                restart is tried and the closest acceptable pose to it is returned instead
+                (see `travel_cost`).
 
-        `prefer` is a configuration the arm is coming from. The fingers-down constraint leaves
-        roll free, so a square has a continuum of solutions and every one of them reaches it
-        equally well; without a preference the first acceptable one wins, which is a coin toss
-        between poses a quarter-turn apart. Given one, every restart is tried and the closest
-        acceptable pose to `prefer` is returned instead (see `travel_cost`).
+        Returns:
+            The chosen configuration in `ARM_JOINT_NAMES` order, its TCP error in metres, and
+            its approach angle off vertical in degrees.
         """
         best_qpos = np.array(self._index.arm_qpos, dtype=np.float64)
         best_error, best_angle = np.inf, np.inf
@@ -289,6 +389,15 @@ class VerticalGraspSolver:
 
         For following a moving target, where the previous configuration is the seed and a
         restart would jump to an unrelated solution between one step and the next.
+
+        Args:
+            target: World point the TCP should sit at, metres.
+            seed: Arm configuration to start from, in `ARM_JOINT_NAMES` order.
+            weight: How hard the approach-axis error counts against the position error.
+
+        Returns:
+            The refined configuration, its TCP error in metres, and its approach angle off
+            vertical in degrees.
         """
         qpos = self._refine(np.asarray(seed, dtype=np.float64), target, weight)
         error, angle = self.measure(qpos, target)
@@ -304,7 +413,21 @@ class VerticalGraspSolver:
         accept: Callable[[npt.NDArray[np.float64]], bool] | None = None,
         prefer: Sequence[float] | None = None,
     ) -> GraspPose:
-        """Solve a fingers-down pose over one square, `height` above the playing surface."""
+        """Solve a fingers-down pose over one square.
+
+        Args:
+            square: Algebraic square name, e.g. "e4".
+            board: Board geometry the square is measured on.
+            board_pose: World placement of that board.
+            rng: Source of the random restart seeds.
+            height: How far above the playing surface the TCP should sit, metres.
+            accept: Screen applied to converged, in-tolerance poses; see `solve`.
+            prefer: Configuration the arm is coming from; see `solve`.
+
+        Returns:
+            The pose settled on, carrying the error and approach angle it was reached at —
+            in tolerance or not.
+        """
         target = board.square_to_world(square, board_pose).astype(np.float64)
         target[2] = board.surface_height + height
         qpos, error, angle = self.solve(target, rng, accept=accept, prefer=prefer)
@@ -317,9 +440,17 @@ class VerticalGraspSolver:
 
 
 def load_reference_grasps(path: Path = REFERENCE_GRASPS_PATH) -> dict[str, GraspPose]:
-    """The solved fingers-down grasp per square, keyed by square name.
+    """Load the solved fingers-down grasp of every square that has one.
 
-    Squares the arm cannot reach this way are absent rather than present-and-invalid.
+    Args:
+        path: Reference-grasp JSON to read.
+
+    Returns:
+        One pose per square, keyed by square name. Squares the arm cannot reach this way are
+        absent rather than present-and-invalid.
+
+    Raises:
+        ValueError: If a stored grasp does not carry one angle per arm joint.
     """
     payload = json.loads(path.read_text())
     grasps = {}
@@ -340,7 +471,14 @@ def load_reference_grasps(path: Path = REFERENCE_GRASPS_PATH) -> dict[str, Grasp
 
 
 def reference_metadata(path: Path = REFERENCE_GRASPS_PATH) -> dict[str, object]:
-    """The board pose and solver settings the reference grasps were produced under."""
+    """Read the conditions the reference grasps were produced under.
+
+    Args:
+        path: Reference-grasp JSON to read.
+
+    Returns:
+        The board pose and solver settings recorded alongside the grasps.
+    """
     payload = json.loads(path.read_text())
     metadata: dict[str, object] = payload["metadata"]
     return metadata

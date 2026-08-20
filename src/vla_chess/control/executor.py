@@ -75,11 +75,24 @@ class ExecutionResult:
 
     @property
     def succeeded(self) -> bool:
+        """Report whether the rollout did what it set out to do.
+
+        Returns:
+            True when the run was never aborted and the piece was both gripped and left
+            standing on its destination.
+        """
         return self.abort_reason is None and self.grasped and self.placed
 
 
 def minimum_jerk(alpha: float) -> float:
-    """Smoothstep with zero velocity and acceleration at both ends."""
+    """Ease a leg's progress so it starts and ends at rest.
+
+    Args:
+        alpha: How far through the leg the motion is, from 0 to 1.
+
+    Returns:
+        The eased fraction, with zero velocity and acceleration at both ends.
+    """
     return float(alpha**3 * (10.0 - 15.0 * alpha + 6.0 * alpha**2))
 
 
@@ -97,6 +110,18 @@ class Executor:
         index: SceneIndex,
         control_hz: float = CONTROL_HZ,
     ) -> None:
+        """Bind the executor to one model and work out how often to step physics.
+
+        Args:
+            model: Scene model to run in, whose timestep sets the decimation.
+            index: Name-to-id lookup for the scene, supplying the arm joints, the actuators
+                and the pieces.
+            control_hz: How often a new command is written, in hertz.
+
+        Raises:
+            ValueError: If the control rate is not positive, or is faster than the model's own
+                physics timestep.
+        """
         if control_hz <= 0.0:
             raise ValueError(f"control_hz must be positive, got {control_hz}")
         decimation = round(1.0 / (control_hz * float(model.opt.timestep)))
@@ -125,22 +150,49 @@ class Executor:
 
     @property
     def control_hz(self) -> float:
+        """Report how often a new command is written.
+
+        Returns:
+            The control rate in hertz.
+        """
         return self._control_hz
 
     @property
     def decimation(self) -> int:
-        """Physics steps per control step."""
+        """Report how much physics runs between commands.
+
+        Returns:
+            Physics steps taken per control step.
+        """
         return self._decimation
 
     def tcp_position(self, qpos: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        """World TCP position at an arm configuration, without touching simulated state."""
+        """Locate the TCP at an arm configuration, without touching simulated state.
+
+        Args:
+            qpos: Arm configuration to measure, in `ARM_JOINT_NAMES` order.
+
+        Returns:
+            World position of the TCP in metres, as a copy that later queries will not
+            overwrite.
+        """
         self._solver.forward(np.asarray(qpos, dtype=np.float64))
         return np.array(self._scratch.site_xpos[self._index.tcp_site_id], copy=True)
 
     def _arm_qpos(self, data: mujoco.MjData) -> npt.NDArray[np.float64]:
+        """Read the five arm joints out of a state, in `ARM_JOINT_NAMES` order."""
         return np.asarray(data.qpos[self._qadr], dtype=np.float64)
 
     def _state(self, data: mujoco.MjData) -> npt.NDArray[np.float64]:
+        """Read one recorded state out of the simulator.
+
+        Args:
+            data: Stepped state to read.
+
+        Returns:
+            Six numbers: the five arm joints in radians, then the jaw on its [0, 100]
+            closed-to-open scale.
+        """
         gripper = normalize_gripper(
             float(data.qpos[self._gripper_qadr]), self._index.gripper_joint_range
         )
@@ -149,6 +201,14 @@ class Executor:
     def _write_ctrl(
         self, data: mujoco.MjData, arm: npt.NDArray[np.float64], gripper: float
     ) -> None:
+        """Command one arm configuration and jaw opening.
+
+        Args:
+            data: State to write the actuator commands into.
+            arm: Joint angles to command, in `ARM_JOINT_NAMES` order.
+            gripper: Jaw command on the [0, 100] closed-to-open scale, converted back into a
+                joint angle on the way in.
+        """
         for name, value in zip(ARM_JOINT_NAMES, arm, strict=True):
             data.ctrl[self._index.arm_actuator_id[name]] = value
         data.ctrl[self._index.gripper_actuator_id] = denormalize_gripper(
@@ -156,11 +216,18 @@ class Executor:
         )
 
     def _holding(self, data: mujoco.MjData, piece_body: int) -> bool:
-        """Whether both jaws are currently bearing on the piece being moved.
+        """Report whether both jaws are currently bearing on the piece being moved.
 
         One jaw is not a hold. The fixed finger rides on the `gripper` body and touches for
         reasons unrelated to gripping, so accepting either jaw reported a grasp for the run
         that left the pawn standing on its square (docs/trajectory.md).
+
+        Args:
+            data: Stepped state to read the contacts from.
+            piece_body: Body id of the piece being moved.
+
+        Returns:
+            True when the fixed finger and the moving jaw both bear on it.
         """
         return grip_contacts(self._model, data, piece_body).is_gripped()
 
@@ -173,8 +240,22 @@ class Executor:
     ) -> ExecutionResult:
         """Execute a plan, recording one state/action pair per control step.
 
-        `on_control_step` is called after each step with the index and the stepped state; it is
-        how observation capture attaches without this loop knowing about cameras.
+        Legs are eased between their endpoints and flown either in joint space or, for the
+        Cartesian ones, by tracking the interpolated TCP target with fingers-down IK. The run
+        ends early on the first abort condition, leaving everything recorded up to that step.
+
+        Args:
+            data: Simulated state to run the plan in; stepped throughout.
+            plan: The waypoints to fly, in order.
+            on_control_step: Called after each step with the step's index and the stepped
+                state. It is how observation capture attaches without this loop knowing about
+                cameras, and the time it spends is excluded from the wall-clock budget.
+            wall_clock_limit: Seconds of the executor's own work allowed before the run is
+                aborted as stuck.
+
+        Returns:
+            The rollout: its states and actions, the phase each step belonged to, whether the
+            piece was gripped and where it ended up, and what the run cost.
         """
         started = time.monotonic()
         observing = 0.0
@@ -277,7 +358,16 @@ class Executor:
         )
 
     def _settled(self, data: mujoco.MjData, piece_body: int) -> bool:
-        """Whether the moved piece is standing on the surface rather than tipped or airborne."""
+        """Report whether the moved piece is standing rather than tipped or airborne.
+
+        Args:
+            data: Stepped state to read the piece's pose from.
+            piece_body: Body id of the piece that was moved.
+
+        Returns:
+            True when it sits within a centimetre of the playing surface and stands within
+            10 degrees of upright.
+        """
         height = float(data.xpos[piece_body][2])
         surface = self._index.board.surface_height
         upright = float(data.xmat[piece_body].reshape(3, 3)[2, 2])
@@ -290,6 +380,20 @@ class Executor:
         deadline_from: float,
         wall_clock_limit: float,
     ) -> AbortReason | None:
+        """Look for a reason to end the rollout early.
+
+        Args:
+            data: Stepped state to test.
+            bystanders: Starting world position of every piece other than the one being
+                moved, keyed by the square it started on.
+            deadline_from: Monotonic time the budget is measured from, already pushed forward
+                by whatever the caller spent outside this loop.
+            wall_clock_limit: Seconds allowed past `deadline_from` before the run is aborted
+                as stuck.
+
+        Returns:
+            The first condition that has been tripped, or None while the run is healthy.
+        """
         if not np.all(np.isfinite(data.qpos)) or not np.all(np.isfinite(data.qvel)):
             return AbortReason.NON_FINITE_STATE
         arm = self._arm_qpos(data)
@@ -305,7 +409,15 @@ class Executor:
 
 
 def _boundaries(phases: list[Phase]) -> dict[Phase, tuple[int, int]]:
-    """First and last control-step index of each phase that ran."""
+    """Mark out where each phase started and stopped.
+
+    Args:
+        phases: The phase every control step belonged to, in order.
+
+    Returns:
+        First and last step index of each phase that ran, keyed by phase. Phases the run
+        never reached are absent.
+    """
     spans: dict[Phase, tuple[int, int]] = {}
     for step, phase in enumerate(phases):
         if phase not in spans:

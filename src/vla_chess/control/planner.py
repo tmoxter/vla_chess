@@ -88,6 +88,13 @@ class Waypoint:
     qpos: ArmQpos | None = None
 
     def __post_init__(self) -> None:
+        """Reject a leg that says nowhere to go, or takes no time getting there.
+
+        Raises:
+            ValueError: If the waypoint carries neither or both of a position and a
+                configuration, if its duration is not positive, or if its jaw command falls
+                outside the normalised range.
+        """
         if (self.position is None) == (self.qpos is None):
             raise ValueError(
                 f"{self.phase.value}: a waypoint takes exactly one of position or qpos, "
@@ -102,6 +109,12 @@ class Waypoint:
 
     @property
     def is_cartesian(self) -> bool:
+        """Report which kind of leg this is.
+
+        Returns:
+            True when the leg is flown to a world TCP target, False when it interpolates
+            joint angles.
+        """
         return self.position is not None
 
 
@@ -128,6 +141,12 @@ class MoveSpec:
     return_duration: float = 2.5
 
     def __post_init__(self) -> None:
+        """Reject a move no plan can be laid out for.
+
+        Raises:
+            ValueError: If the piece is asked to move to the square it already stands on, or
+                if the hover height does not clear the grasp height.
+        """
         if self.source == self.target:
             raise ValueError(f"source and target are the same square: {self.source}")
         if self.hover_height <= self.grasp_height:
@@ -136,7 +155,11 @@ class MoveSpec:
             )
 
     def instruction(self) -> str:
-        """The episode-level task string for this move."""
+        """Phrase this move as the episode's task string.
+
+        Returns:
+            One natural-language sentence naming the piece, its square and its destination.
+        """
         return f"move the {self.piece_type.value} from {self.source} to {self.target}"
 
 
@@ -146,8 +169,7 @@ class PlanInfeasible(RuntimeError):
 
 @dataclass(frozen=True)
 class Plan:
-    """A solved plan: its waypoints, the configurations its joint-space legs end at, and
-    the instruction that describes it."""
+    """A solved plan: its waypoints, its anchor configurations, and what it is trying to do."""
 
     spec: MoveSpec
     waypoints: tuple[Waypoint, ...]
@@ -156,12 +178,18 @@ class Plan:
     instruction: str
 
     def phases(self) -> tuple[Phase, ...]:
+        """List the phases this plan passes through.
+
+        Returns:
+            One phase per waypoint, in the order they are flown.
+        """
         return tuple(waypoint.phase for waypoint in self.waypoints)
 
 
 def _above(
     board: Board, square: str, board_pose: BoardPose, height: float
 ) -> tuple[float, float, float]:
+    """Locate the world point `height` above one square's centre."""
     point = board.square_to_world(square, board_pose)
     return (float(point[0]), float(point[1]), float(board.surface_height + height))
 
@@ -169,7 +197,7 @@ def _above(
 def _stand_off(
     point: tuple[float, float, float], axis: npt.NDArray[np.float64], distance: float
 ) -> tuple[float, float, float]:
-    """`point` pulled back along the closing axis, putting the piece on the moving jaw's side."""
+    """Pull `point` back along the closing axis, onto the moving jaw's side of the gap."""
     stood = np.asarray(point, dtype=np.float64) - distance * axis
     return (float(stood[0]), float(stood[1]), float(stood[2]))
 
@@ -177,11 +205,24 @@ def _stand_off(
 def closing_axis(
     model: mujoco.MjModel, data: mujoco.MjData, index: SceneIndex, qpos: ArmQpos
 ) -> npt.NDArray[np.float64]:
-    """World direction the jaws open toward at `qpos`, levelled into the board's plane.
+    """Measure the direction the jaws open toward at one configuration.
 
     The moving jaw sweeps out along the gripper body's own +x, so this is the direction a
     standoff has to run along. Levelling it keeps a standoff from changing the grasp height;
-    at a fingers-down pose the axis is horizontal to within a degree anyway. `data` is mutated.
+    at a fingers-down pose the axis is horizontal to within a degree anyway.
+
+    Args:
+        model: Scene model carrying the gripper body.
+        data: State the configuration is written into and kinematics run on; mutated.
+        index: Name-to-id lookup for the scene, supplying the arm joints.
+        qpos: Arm configuration to measure at, in `ARM_JOINT_NAMES` order.
+
+    Returns:
+        Unit vector in the world frame, levelled into the board's plane.
+
+    Raises:
+        PlanInfeasible: If the jaws close along the vertical, leaving the axis nothing to
+            project onto.
     """
     data.qpos[[model.jnt_qposadr[index.arm_joint_id[n]] for n in ARM_JOINT_NAMES]] = qpos
     mujoco.mj_kinematics(model, data)
@@ -208,7 +249,7 @@ def solve_hover_pose(
     gripper_qpos: float | None = None,
     prefer: ArmQpos | None = None,
 ) -> ArmQpos:
-    """A collision-screened fingers-down configuration `height` above one square.
+    """Solve a collision-screened fingers-down configuration over one square.
 
     Screened the way the reference grasps are, but at the opening the plan will actually be
     holding: the arm's resting self-contacts subtracted as baseline, and the piece on the
@@ -216,8 +257,25 @@ def solve_hover_pose(
     touched at all. Screening wide open instead would test a jaw that has swung 100 mm clear of
     everything the plan cares about.
 
-    `prefer` is the configuration the leg into this anchor starts from, and picks the anchor out
-    of the roll continuum that is nearest to it.
+    Args:
+        model: Scene model to solve in.
+        data: State the screening poses are written into; mutated.
+        index: Name-to-id lookup for the scene, supplying the board, its pose and the pieces.
+        solver: Fingers-down IK to search with.
+        square: Algebraic name of the square to stand over, e.g. "e4".
+        height: How far above the playing surface the TCP should sit, metres.
+        rng: Source of the solver's random restart seeds.
+        gripper_qpos: Jaw angle the pose is screened at, in radians. The jaw's upper limit is
+            used when omitted.
+        prefer: Configuration the leg into this anchor starts from, which picks the anchor out
+            of the roll continuum that is nearest to it.
+
+    Returns:
+        The screened configuration, in `ARM_JOINT_NAMES` order.
+
+    Raises:
+        PlanInfeasible: If no pose over the square both reaches it within tolerance and comes
+            through the screen.
     """
     baseline = baseline_self_pairs(model, data, index, np.random.default_rng(0))
     hands = hand_body_ids(model)
@@ -225,6 +283,7 @@ def solve_hover_pose(
     opening = index.gripper_joint_range[1] if gripper_qpos is None else gripper_qpos
 
     def accept(qpos: npt.NDArray[np.float64]) -> bool:
+        """Report whether a candidate pose touches nothing and leaves the piece clear."""
         contacts = contacts_at_pose(
             model,
             data,
@@ -267,6 +326,24 @@ def plan_move(
     The two survey transits are joint-space legs on purpose. Interpolating them in Cartesian
     space would ask the solver to hold the fingers down from the first control step, which
     turns the survey pose's wrist orientation into a step change rather than a motion.
+
+    Args:
+        spec: The move to plan, with the duration of each of its legs.
+        model: Scene model to solve in.
+        data: State the solving and screening poses are written into; mutated.
+        index: Name-to-id lookup for the scene, supplying the board, its pose and the pieces.
+        solver: Fingers-down IK to search with.
+        rng: Source of the solver's random restart seeds.
+        solve_hover: Anchor solver to call, taking the signature of `solve_hover_pose`.
+        jaw_axis: Closing-direction measurement to call, taking the signature of
+            `closing_axis`.
+
+    Returns:
+        The plan, carrying its waypoints and the two anchor configurations its joint-space
+        legs were solved against.
+
+    Raises:
+        PlanInfeasible: If either anchor has no collision-free fingers-down pose.
     """
     board, board_pose = index.board, index.board_pose
     # A piece rests its base on the playing surface, so the height the jaws close at is the
@@ -337,5 +414,12 @@ def plan_move(
 
 
 def total_duration(waypoints: tuple[Waypoint, ...]) -> float:
-    """Wall-clock seconds a plan's legs add up to."""
+    """Add up how long a plan's legs take.
+
+    Args:
+        waypoints: The legs to total, in any order.
+
+    Returns:
+        Wall-clock seconds the plan is scheduled to run for.
+    """
     return float(sum(waypoint.duration for waypoint in waypoints))
