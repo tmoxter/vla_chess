@@ -1,3 +1,5 @@
+"""Offscreen rendering of a fixed camera set, and the osmesa contexts it holds open."""
+
 import math
 import os
 from collections.abc import Sequence
@@ -19,7 +21,11 @@ _BACKEND_HELP: Final = (
 
 
 def check_gl_backend() -> None:
-    """Raise unless the MUJOCO_GL environment variable selects the osmesa backend."""
+    """Raise unless the MUJOCO_GL environment variable selects the osmesa backend.
+
+    Raises:
+        RuntimeError: If the variable is unset or names any other backend.
+    """
     backend = os.environ.get("MUJOCO_GL")
     found = "unset" if backend is None else repr(backend)
     if backend != REQUIRED_GL_BACKEND:
@@ -29,7 +35,12 @@ def check_gl_backend() -> None:
 
 
 def _check_resolved_backend() -> None:
-    """Raise unless the GL backend mujoco actually bound is osmesa."""
+    """Raise unless the GL backend mujoco actually bound is osmesa.
+
+    Raises:
+        RuntimeError: If mujoco resolved a different backend, which setting MUJOCO_GL now
+            cannot undo.
+    """
     import mujoco.gl_context
 
     resolved = mujoco.gl_context.GLContext.__module__.rsplit(".", 1)[-1]
@@ -49,6 +60,11 @@ class FreeCameraPose:
     lookat: tuple[float, float, float]
 
     def __post_init__(self) -> None:
+        """Reject a placement that points the camera nowhere.
+
+        Raises:
+            ValueError: If the position and the lookat coincide, leaving no view direction.
+        """
         if self.position == self.lookat:
             raise ValueError("camera position and lookat must differ to define a view direction")
 
@@ -69,6 +85,13 @@ class CameraSpec:
     pose: FreeCameraPose | None = None
 
     def __post_init__(self) -> None:
+        """Reject a view that cannot be rendered as described.
+
+        Raises:
+            ValueError: If the name is empty, either pixel dimension is not positive, the
+                field of view falls outside (0, 180), or a free pose is combined with an
+                attachment a free camera cannot have.
+        """
         if not self.name:
             raise ValueError("camera name must be a non-empty string")
         if self.width <= 0 or self.height <= 0:
@@ -102,6 +125,21 @@ class Renderer:
     """
 
     def __init__(self, model: mujoco.MjModel, cameras: Sequence[CameraSpec]) -> None:
+        """Resolve every camera and open one backend per distinct resolution.
+
+        A backend that fails to open takes the ones already opened down with it, so a failed
+        construction leaves no contexts behind.
+
+        Args:
+            model: Scene model to render. A spec carrying a field of view writes it into this
+                model's camera, so the model is mutated.
+            cameras: The views to render, in the order `render` will produce them.
+
+        Raises:
+            ValueError: If no camera is given, if two share an output name, or if any spec
+                names a camera the model does not have.
+            RuntimeError: If the GL backend in force is not osmesa.
+        """
         check_gl_backend()
         _check_resolved_backend()
         specs = tuple(cameras)
@@ -133,28 +171,55 @@ class Renderer:
 
     @property
     def cameras(self) -> tuple[CameraSpec, ...]:
-        """The camera specifications this renderer was built for, in render order."""
+        """Report the views this renderer was built for.
+
+        Returns:
+            The camera specifications, in render order.
+        """
         return self._specs
 
     @property
     def camera_names(self) -> tuple[str, ...]:
-        """The output keys produced by `render`, in render order."""
+        """Name the views this renderer produces.
+
+        Returns:
+            The output keys `render` returns, in render order.
+        """
         return tuple(spec.name for spec in self._specs)
 
     @property
     def backend_count(self) -> int:
-        """How many `mujoco.Renderer` instances (and osmesa contexts) are held open."""
+        """Count the GL contexts currently held open.
+
+        Returns:
+            One per distinct resolution among the cameras, not one per camera.
+        """
         return len(self._backends)
 
     def buffer(self, name: str) -> RgbFrame:
-        """The reused output buffer for one camera."""
+        """Reach the reused output buffer of one camera.
+
+        Args:
+            name: Output key of the camera, as given in its spec.
+
+        Returns:
+            The buffer that camera renders into, as (height, width, 3) uint8. It is the same
+            array on every call, and every render overwrites it.
+        """
         return self._buffers[name]
 
     def render(self, data: mujoco.MjData) -> dict[str, RgbFrame]:
         """Render every camera for the given state into this renderer's buffers.
 
-        The returned arrays are owned by the renderer and are overwritten by the next call;
-        callers that keep a frame must copy it.
+        Args:
+            data: Simulated state to view, which is read rather than stepped.
+
+        Returns:
+            One frame per camera, keyed by output name. The arrays are owned by the renderer
+            and are overwritten by the next call; callers that keep a frame must copy it.
+
+        Raises:
+            RuntimeError: If the renderer has already been closed.
         """
         if self._closed:
             raise RuntimeError("Renderer is closed; render() cannot be called after close()")
@@ -175,14 +240,40 @@ class Renderer:
         self._closed = True
 
     def __enter__(self) -> "Renderer":
+        """Enter a block that frees the GL contexts on the way out.
+
+        Returns:
+            This renderer, already constructed and ready to render.
+        """
         return self
 
     def __exit__(self, *exc_info: object) -> None:
+        """Free the GL contexts on leaving the block, however it was left.
+
+        Args:
+            *exc_info: Exception type, value and traceback, ignored — an exception on the way
+                out still has to give the contexts back.
+        """
         self.close()
 
 
 def _resolve_camera(model: mujoco.MjModel, spec: CameraSpec) -> _ResolvedCamera:
-    """Turn a CameraSpec into the camera argument `mujoco.Renderer.update_scene` expects."""
+    """Turn a CameraSpec into the camera argument `mujoco.Renderer.update_scene` expects.
+
+    Args:
+        model: Scene model the camera is looked up in, and whose camera field of view is
+            overwritten when the spec sets one.
+        spec: The view to resolve; a spec carrying a pose becomes a free camera, otherwise a
+            model camera is looked up by name.
+
+    Returns:
+        The spec paired with the handle to render it through, and whether that handle is a
+        free camera.
+
+    Raises:
+        ValueError: If the model has no camera of that name, or the camera is not attached to
+            the body the spec declares.
+    """
     if spec.pose is not None:
         return _ResolvedCamera(spec=spec, handle=_free_camera(spec.pose), free=True)
 
@@ -201,7 +292,17 @@ def _resolve_camera(model: mujoco.MjModel, spec: CameraSpec) -> _ResolvedCamera:
 
 
 def _check_attachment(model: mujoco.MjModel, name: str, cam_id: int, body: str) -> None:
-    """Raise unless the model camera is a child of the named body."""
+    """Raise unless the model camera is a child of the named body.
+
+    Args:
+        model: Scene model both the camera and the body are looked up in.
+        name: Camera name, used only to say which camera failed.
+        cam_id: Id of the camera whose parent is being checked.
+        body: Name of the body the spec expects the camera to hang from.
+
+    Raises:
+        ValueError: If the model has no such body, or the camera hangs from a different one.
+    """
     body_id = int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body))
     if body_id < 0:
         raise ValueError(f"camera {name!r} declares attached_body {body!r}, which is not in model")
@@ -218,6 +319,13 @@ def _free_camera(pose: FreeCameraPose) -> mujoco.MjvCamera:
 
     Roll is fixed by MuJoCo's free-camera parameterisation: world +z stays up. A free camera's
     field of view is the model-global one, so `CameraSpec.fovy` is applied per render call.
+
+    Args:
+        pose: Where the camera sits and what it looks at, in world metres.
+
+    Returns:
+        A free camera at that placement, its distance, elevation and azimuth derived from the
+        two points.
     """
     camera = mujoco.MjvCamera()
     camera.type = mujoco.mjtCamera.mjCAMERA_FREE
