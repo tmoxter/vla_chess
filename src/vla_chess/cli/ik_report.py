@@ -3,9 +3,9 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from vla_chess.ik_report import DEFAULT_ROUNDTRIP_CASES, ik_markdown, measure_all
-from vla_chess.kinematics import IKConfig
-from vla_chess.scene import SceneDescription, build_scene
+from vla_chess.analysis.ik_report import DEFAULT_ROUNDTRIP_CASES, ik_markdown, measure_all
+from vla_chess.analysis.reference_ik import IKConfig
+from vla_chess.sim.scene import SceneDescription, build_scene
 
 DEFAULT_OUTPUT = Path("docs/ik.md")
 

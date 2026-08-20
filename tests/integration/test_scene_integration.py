@@ -4,8 +4,8 @@ import mujoco
 import numpy as np
 import pytest
 
-from vla_chess.render import CameraSpec, Renderer
-from vla_chess.scene import (
+from vla_chess.sensor.render import CameraSpec, Renderer
+from vla_chess.sim.scene import (
     ARM_JOINT_NAMES,
     RESTING_ARM_QPOS,
     SO101_XML_PATH,

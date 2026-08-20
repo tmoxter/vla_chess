@@ -5,9 +5,45 @@
 ### Comments
 
 Use inline comments where needed, don't add any comments at the top of any files.
-This creates drift. Write brief docstrings describing only what the unit does,
-don't let context from the calling places creep into a function's docstring and
-comments.
+This creates drift. Describe only what the unit itself does — context from the calling
+places does not belong in a function's comments or its docstring.
+
+### Docstrings
+
+Use **Google style**: an imperative one-line summary, then `Args:` / `Returns:` / `Raises:`
+sections where the function takes arguments, returns something, or raises on purpose. Types
+live in the signature — mypy enforces them there — so don't repeat them in the docstring.
+Describe what a parameter *means* and what the return value *is*, including units and frames
+wherever the name alone doesn't say.
+
+Every function and method gets one, with two exceptions:
+
+- **Unit tests.** The test name and its assertions are the documentation. Add a docstring only
+  where the setup encodes something a reader could not otherwise infer.
+- **Local helpers with a leading underscore** that do no complex multi-step work and whose name
+  already says what they do. Those get a single-line docstring and no sections — and the name
+  has to earn it. A private helper that *does* do multi-step work is documented in full like
+  anything else.
+
+```python
+def solve_square(square: str, prefer: Configuration | None = None) -> Pose:
+    """Solve a vertical grasp pose for a board square.
+
+    Args:
+        square: Algebraic square name, e.g. "e4".
+        prefer: Configuration the arm is coming from; the nearest acceptable pose to it
+            is returned. Pass this whenever the arm is already somewhere.
+
+    Returns:
+        Grasp pose in the world frame.
+
+    Raises:
+        ValueError: If no acceptable pose reaches the square.
+    """
+```
+
+This is a convention, not a lint rule: ruff's `D`/`DOC` rules are deliberately left off for
+now, so nothing will catch a missing docstring for you. It may become enforced later.
 
 ### Tests
 
@@ -22,10 +58,40 @@ actions between these interfaces.
 - Use ruff.
 - Set up a pixi pre-commit task running unit tests, type checks, and lints.
 
+## Layout
+
+```
+src/vla_chess/
+  paths.py     asset root; every asset path resolves from here, never from a module's __file__
+  sim/         the world: scene assembly, board/square geometry, contacts, starting positions
+  grasp/       the IK — vertical (fingers-down) grasp solving and the solved reference set
+  control/     planner (move -> waypoints) and executor (waypoints -> simulated motion)
+  sensor/      what the policy sees: offscreen rendering
+  dataset/     episode recording and training-trajectory production
+  viz/         output for humans: contact sheets, captions, video
+  analysis/    instrumentation: benchmarks, probes and the reports under docs/
+  cli/         argparse shells; no logic worth testing lives here
+```
+
+Imports point **down** this list and never back up: `sim` imports nothing else in the package,
+`grasp` and `sensor` build on `sim`, `control` on `sim` + `grasp`, `dataset` on everything above
+it. `viz`, `analysis` and `cli` sit outside the stack and may import anything. If a change needs
+an edge that points up, the module is in the wrong package — move it rather than adding the
+import. This is a convention, not a lint rule; `import-linter` can enforce it later if it drifts.
+
+A CLI is argparse plus wiring. The function it calls must be importable and testable without
+argparse — if you find yourself testing a CLI, the logic is in the wrong tier.
+
+Everything here was one flat module per name until the 2026-08-20 reorganisation, so older
+design docs say `scene.grip_radius` where the code now says `sim.scene.grip_radius`. Leaf module
+names are unchanged and those references still resolve by name, with one exception: the mink
+solver formerly at `kinematics.IKSolver` is now `analysis.reference_ik.IKSolver`. It is a
+cross-check for `ik_report`, not a runtime dependency — nothing outside `analysis/` imports it.
+
 ## Scene conventions
 
 These are the project's standing assumptions for training and simulation, encoded as the
-defaults in `src/vla_chess/scene.py`. Treat them as the baseline; a scene that departs from
+defaults in `src/vla_chess/sim/scene.py`. Treat them as the baseline; a scene that departs from
 them is an experiment, not the norm, and should say so at the call site.
 
 - **The arm plays black, from behind the black back rank.** The arm's `base` is pinned at the

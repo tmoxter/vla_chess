@@ -5,7 +5,7 @@ from pathlib import Path
 
 import mujoco
 
-from vla_chess.bench import (
+from vla_chess.analysis.bench import (
     DEFAULT_CAMERA_COUNTS,
     DEFAULT_RESOLUTIONS,
     TARGET_RESOLUTION,

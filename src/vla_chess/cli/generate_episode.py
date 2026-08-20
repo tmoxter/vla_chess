@@ -8,14 +8,13 @@ from typing import Final
 
 import numpy as np
 
-from vla_chess.cli.solve_reference_grasps import starting_position
-from vla_chess.executor import CONTROL_HZ, Executor
-from vla_chess.grasp import GRASP_HEIGHT, VerticalGraspSolver
-from vla_chess.imaging import contact_sheet, downscale, write_png
-from vla_chess.observe import DEFAULT_FPS, Frame, ObservationRecorder, image_is_sane
-from vla_chess.planner import MoveSpec, plan_move, total_duration
-from vla_chess.render import CameraSpec, FreeCameraPose, Renderer
-from vla_chess.scene import (
+from vla_chess.control.executor import CONTROL_HZ, Executor
+from vla_chess.control.planner import MoveSpec, plan_move, total_duration
+from vla_chess.dataset.observe import DEFAULT_FPS, Frame, ObservationRecorder, image_is_sane
+from vla_chess.grasp.solver import GRASP_HEIGHT, VerticalGraspSolver
+from vla_chess.sensor.render import CameraSpec, FreeCameraPose, Renderer
+from vla_chess.sim.positions import starting_position
+from vla_chess.sim.scene import (
     BIRDS_EYE_ARM_QPOS,
     DEFAULT_BOARD_POSE,
     RENDER_OFFHEIGHT,
@@ -27,6 +26,7 @@ from vla_chess.scene import (
     make_data,
     pinch_offset_for,
 )
+from vla_chess.viz.imaging import contact_sheet, downscale, write_png
 
 DEFAULT_OUTPUT_DIR: Final = Path("docs/episode-views")
 SHEET_COLUMNS: Final = 4

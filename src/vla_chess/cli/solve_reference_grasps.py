@@ -7,8 +7,7 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 
-from vla_chess.collision import baseline_self_pairs, contacts_at_pose
-from vla_chess.grasp import (
+from vla_chess.grasp.solver import (
     GRASP_HEIGHT,
     MAX_APPROACH_DEG,
     MAX_TCP_ERROR,
@@ -16,40 +15,17 @@ from vla_chess.grasp import (
     REFERENCE_GRASPS_PATH,
     VerticalGraspSolver,
 )
-from vla_chess.scene import (
+from vla_chess.sim.collision import baseline_self_pairs, contacts_at_pose
+from vla_chess.sim.positions import starting_position
+from vla_chess.sim.scene import (
     ARM_JOINT_NAMES,
     FILES,
     RANKS,
     BoardPose,
-    PieceColor,
-    PiecePlacement,
-    PieceType,
     SceneDescription,
     build_scene,
     make_data,
 )
-
-BACK_RANK: Sequence[PieceType] = (
-    PieceType.ROOK,
-    PieceType.KNIGHT,
-    PieceType.BISHOP,
-    PieceType.QUEEN,
-    PieceType.KING,
-    PieceType.BISHOP,
-    PieceType.KNIGHT,
-    PieceType.ROOK,
-)
-
-
-def starting_position() -> tuple[PiecePlacement, ...]:
-    """The 32-piece initial chess position."""
-    placements = []
-    for index, file in enumerate(FILES):
-        placements.append(PiecePlacement(f"{file}8", BACK_RANK[index], PieceColor.BLACK))
-        placements.append(PiecePlacement(f"{file}7", PieceType.PAWN, PieceColor.BLACK))
-        placements.append(PiecePlacement(f"{file}1", BACK_RANK[index], PieceColor.WHITE))
-        placements.append(PiecePlacement(f"{file}2", PieceType.PAWN, PieceColor.WHITE))
-    return tuple(placements)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

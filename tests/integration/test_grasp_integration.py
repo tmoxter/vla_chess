@@ -5,8 +5,7 @@ import numpy as np
 import pytest
 
 from vla_chess.cli.solve_reference_grasps import starting_position
-from vla_chess.collision import baseline_self_pairs, contacts_at_pose
-from vla_chess.grasp import (
+from vla_chess.grasp.solver import (
     GRASP_HEIGHT,
     MAX_APPROACH_DEG,
     MAX_TCP_ERROR,
@@ -15,7 +14,8 @@ from vla_chess.grasp import (
     finger_axis_site_frame,
     load_reference_grasps,
 )
-from vla_chess.scene import SceneDescription, SceneIndex, build_scene, make_data
+from vla_chess.sim.collision import baseline_self_pairs, contacts_at_pose
+from vla_chess.sim.scene import SceneDescription, SceneIndex, build_scene, make_data
 
 pytestmark = [pytest.mark.slow]
 

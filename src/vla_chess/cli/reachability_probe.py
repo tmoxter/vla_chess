@@ -6,7 +6,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from vla_chess.reachability import (
+from vla_chess.analysis.reachability import (
     DEFAULT_N_SAMPLES,
     DEFAULT_XY_TOLERANCE,
     DEFAULT_Z_BAND,
@@ -18,7 +18,7 @@ from vla_chess.reachability import (
     sample_tcp_positions,
     sweep_envelope,
 )
-from vla_chess.scene import SceneDescription, build_scene
+from vla_chess.sim.scene import SceneDescription, build_scene
 
 DEFAULT_OUTPUT = Path("docs/reachability.md")
 ENVELOPE_PITCH_STEPS = 5

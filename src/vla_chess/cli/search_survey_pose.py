@@ -7,9 +7,10 @@ import numpy as np
 import numpy.typing as npt
 from scipy.optimize import minimize
 
-from vla_chess.cli.solve_reference_grasps import starting_position
-from vla_chess.grasp import joint_limits
-from vla_chess.scene import (
+from vla_chess.analysis.survey import LIMIT_MARGIN, SurveyFraming, framing, level_rolls
+from vla_chess.grasp.solver import joint_limits
+from vla_chess.sim.positions import starting_position
+from vla_chess.sim.scene import (
     BIRDS_EYE_ARM_QPOS,
     DEFAULT_BOARD_POSE,
     BoardPose,
@@ -18,7 +19,6 @@ from vla_chess.scene import (
     build_scene,
     make_data,
 )
-from vla_chess.survey import LIMIT_MARGIN, SurveyFraming, framing, level_rolls
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

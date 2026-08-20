@@ -8,11 +8,10 @@ import mujoco
 import numpy as np
 import numpy.typing as npt
 
-from vla_chess.cli.solve_reference_grasps import starting_position
-from vla_chess.grasp import load_reference_grasps
-from vla_chess.imaging import caption, write_png
-from vla_chess.render import CameraSpec, FreeCameraPose, Renderer
-from vla_chess.scene import (
+from vla_chess.grasp.solver import load_reference_grasps
+from vla_chess.sensor.render import CameraSpec, FreeCameraPose, Renderer
+from vla_chess.sim.positions import starting_position
+from vla_chess.sim.scene import (
     ARM_JOINT_NAMES,
     BIRDS_EYE_ARM_QPOS,
     DEFAULT_BOARD_POSE,
@@ -24,6 +23,7 @@ from vla_chess.scene import (
     build_scene,
     make_data,
 )
+from vla_chess.viz.imaging import caption, write_png
 
 DEFAULT_OUTPUT_DIR: Final = Path("docs/reference-views")
 BACK_RANK_SQUARES: Final = ("c8", "d8", "e8")

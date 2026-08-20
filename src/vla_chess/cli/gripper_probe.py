@@ -4,10 +4,10 @@ from collections.abc import Sequence
 import mujoco
 import numpy as np
 
-from vla_chess.calibration import measure_jaw_faces
-from vla_chess.collision import piece_clearance
-from vla_chess.grasp import GRASP_HEIGHT, VerticalGraspSolver
-from vla_chess.scene import (
+from vla_chess.analysis.calibration import measure_jaw_faces
+from vla_chess.grasp.solver import GRASP_HEIGHT, VerticalGraspSolver
+from vla_chess.sim.collision import piece_clearance
+from vla_chess.sim.scene import (
     ARM_JOINT_NAMES,
     FIXED_FACE_INSET,
     GRIPPER_BODY_NAME,

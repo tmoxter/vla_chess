@@ -30,5 +30,5 @@ def test_fully_deselected_run_exits_zero() -> None:
 
 def test_run_without_any_collected_test_fails() -> None:
     """A suite that collects nothing at all still fails, so the gate cannot pass empty."""
-    result = _run_pytest("-m", "not slow", "tests/unit", "--ignore-glob=tests/unit/test_*.py")
+    result = _run_pytest("-m", "not slow", "tests/unit", "--ignore-glob=*/test_*.py")
     assert result.returncode == pytest.ExitCode.NO_TESTS_COLLECTED, result.stdout
