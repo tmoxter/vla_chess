@@ -8,23 +8,17 @@ from typing import Final
 
 import numpy as np
 
-from vla_chess.control.executor import CONTROL_HZ, Executor
-from vla_chess.control.planner import MoveSpec, plan_move, total_duration
-from vla_chess.dataset.observe import DEFAULT_FPS, Frame, ObservationRecorder, image_is_sane
-from vla_chess.grasp.solver import GRASP_HEIGHT, VerticalGraspSolver
-from vla_chess.sensor.render import CameraSpec, FreeCameraPose, Renderer
+from vla_chess.control.executor import CONTROL_HZ
+from vla_chess.control.planner import MoveSpec
+from vla_chess.dataset.episode import EpisodeRunner, git_engine_version
+from vla_chess.dataset.observe import DEFAULT_FPS, Frame, image_is_sane
+from vla_chess.sensor.render import CameraSpec, FreeCameraPose
 from vla_chess.sim.positions import starting_position
 from vla_chess.sim.scene import (
-    BIRDS_EYE_ARM_QPOS,
     DEFAULT_BOARD_POSE,
     RENDER_OFFHEIGHT,
     RENDER_OFFWIDTH,
     WRIST_CAMERA_NAME,
-    SceneDescription,
-    build_scene,
-    grip_radius,
-    make_data,
-    pinch_offset_for,
 )
 from vla_chess.viz.imaging import contact_sheet, downscale, write_png
 
@@ -179,30 +173,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     piece_type = occupant[args.source]
 
-    # The pinch site is built for the piece this episode lifts: it is the middle of the jaws
-    # when they are closed on that piece, so the piece ends up centred between the faces
-    # instead of shoved against one of them.
-    description = SceneDescription(
-        board_pose=DEFAULT_BOARD_POSE,
-        pieces=pieces,
-        arm_qpos=BIRDS_EYE_ARM_QPOS,
-        pinch_offset=pinch_offset_for(grip_radius(piece_type, GRASP_HEIGHT)),
-    )
-    model, index = build_scene(description)
-
     spec = MoveSpec(source=args.source, target=args.target, piece_type=piece_type)
-    plan_data = make_data(model, index)
-    solver = VerticalGraspSolver(model, plan_data, index)
-    print(f"solving anchor poses for {spec.source} -> {spec.target}", flush=True)
-    plan = plan_move(spec, model, plan_data, index, solver, np.random.default_rng(args.seed))
-    print(
-        f"planned {len(plan.waypoints)} waypoints, "
-        f"{total_duration(plan.waypoints):.1f} s: {' '.join(p.value for p in plan.phases())}",
-        flush=True,
-    )
-
-    data = make_data(model, index)
-    executor = Executor(model, index, control_hz=args.control_hz)
     cameras = [CameraSpec(WRIST_CAMERA_NAME, RENDER_OFFWIDTH, RENDER_OFFHEIGHT)]
     if not args.no_witness:
         cameras.append(
@@ -214,11 +185,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 pose=FreeCameraPose(WITNESS_EYE, WITNESS_LOOKAT),
             )
         )
-    with Renderer(model, cameras) as renderer:
-        recorder = ObservationRecorder(renderer, fps=args.fps, control_hz=args.control_hz)
-        print("executing", flush=True)
-        result = executor.run(data, plan, on_control_step=recorder.on_control_step)
-        frames = recorder.frames(result)
+
+    runner = EpisodeRunner(
+        fps=args.fps,
+        control_hz=args.control_hz,
+        pieces=pieces,
+        cameras=cameras,
+        engine_version=git_engine_version(),
+    )
+    print(f"running {spec.source} -> {spec.target}", flush=True)
+    episode = runner.run(spec, seed=args.seed)
+    result = episode.execution
+    frames = episode.frames
 
     print(
         f"{result.diagnostics.control_steps} control steps in "
@@ -267,7 +245,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"wrote {len(frames)} frames to {args.frames_dir}", flush=True)
 
     metadata = {
-        "instruction": plan.instruction,
+        "instruction": episode.instruction,
         "source": spec.source,
         "target": spec.target,
         "board_pose": {"x": DEFAULT_BOARD_POSE.x, "yaw": DEFAULT_BOARD_POSE.yaw},
