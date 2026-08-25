@@ -37,8 +37,28 @@ pytest-cov = ">=5.0"
 mypy = ">=1.11"
 ruff = ">=0.6"
 
+# The LeRobot dataset writer's dependencies, kept in their own environment. lerobot 0.6.1 caps
+# numpy below 2.3 while the default env floats it to 2.5, so `datagen` gets its own solve-group
+# and pins numpy into the window both lerobot and mujoco accept — the default env is untouched.
+# torch and friends come from PyTorch's CPU index: this host has no GPU, and the default index
+# would drag ~5 GB of unusable CUDA wheels onto it. Versions are the ones a 2026-08-17 probe
+# verified end to end (create -> add_frame -> save_episode -> finalize -> offline readback).
+[tool.pixi.feature.datagen.dependencies]
+numpy = ">=1.26,<2.3"
+# lerobot 0.6.1 (and its `datasets` dep) cap packaging and fsspec below versions the conda
+# solve would otherwise float to; pin both into the window they accept.
+packaging = ">=24.2,<26"
+fsspec = ">=2023.1.0,<=2026.2.0"
+
+[tool.pixi.feature.datagen.pypi-dependencies]
+lerobot = { version = "==0.6.1", extras = ["dataset"] }
+torch = { version = "==2.11.0", index = "https://download.pytorch.org/whl/cpu" }
+torchvision = { version = "==0.26.0", index = "https://download.pytorch.org/whl/cpu" }
+torchcodec = { version = "==0.11.1", index = "https://download.pytorch.org/whl/cpu" }
+
 [tool.pixi.environments]
 default = { features = ["dev"], solve-group = "default" }
+datagen = { features = ["dev", "datagen"], solve-group = "datagen" }
 
 [tool.pixi.tasks]
 install-hooks = "git config core.hooksPath .githooks"
