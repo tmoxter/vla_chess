@@ -64,6 +64,10 @@ datagen = { features = ["dev", "datagen"], solve-group = "datagen" }
 install-hooks = "git config core.hooksPath .githooks"
 test = "pytest -m 'not slow' tests/unit"
 test-slow = "pytest -m slow tests"
+# The dataset writer's tests import lerobot, so they only load in the datagen env. They live
+# outside tests/unit so the default `test` task never tries to import lerobot: run them with
+# `pixi run -e datagen test-dataset`.
+test-dataset = "pytest tests/datagen"
 bench-render = "python -m vla_chess.cli.bench_render"
 reachability-probe = "python -m vla_chess.cli.reachability_probe"
 gripper-probe = "python -m vla_chess.cli.gripper_probe"
@@ -106,6 +110,12 @@ extra_checks = true
 
 [[tool.mypy.overrides]]
 module = ["mujoco", "mujoco.*", "scipy", "scipy.*"]
+ignore_missing_imports = true
+
+# lerobot is only installed in the datagen env, but `mypy src` runs in default; treat it as an
+# untyped third-party module there rather than failing on the missing import.
+[[tool.mypy.overrides]]
+module = ["lerobot.*"]
 ignore_missing_imports = true
 
 [tool.ruff]

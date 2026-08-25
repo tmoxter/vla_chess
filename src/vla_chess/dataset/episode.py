@@ -47,6 +47,7 @@ class Episode:
     frames: list[Frame]
     execution: ExecutionResult
     engine_version: str
+    fps: float = DEFAULT_FPS
 
     @property
     def succeeded(self) -> bool:
@@ -181,6 +182,7 @@ class EpisodeRunner:
             frames=frames,
             execution=result,
             engine_version=self._engine_version,
+            fps=self._fps,
         )
 
     def run_all(self, specs: Sequence[MoveSpec], *, base_seed: int = 0) -> Iterator[Episode]:
