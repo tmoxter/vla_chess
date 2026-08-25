@@ -75,6 +75,9 @@ ik-report = "python -m vla_chess.cli.ik_report"
 solve-reference-grasps = "python -m vla_chess.cli.solve_reference_grasps"
 render-reference-views = "python -m vla_chess.cli.render_reference_views"
 generate-episode = "python -m vla_chess.cli.generate_episode"
+# Batch generation writes a LeRobot dataset, so it runs in the datagen env:
+# `pixi run -e datagen generate-dataset --episodes 30`.
+generate-dataset = "python -m vla_chess.cli.generate_dataset"
 search-survey-pose = "python -m vla_chess.cli.search_survey_pose"
 typecheck = "mypy src"
 lint = "ruff check . && ruff format --check ."
