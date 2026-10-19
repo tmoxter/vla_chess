@@ -46,6 +46,12 @@ WORLD_DOWN: Final = (0.0, 0.0, -1.0)
 MAX_TCP_ERROR: Final = 0.003
 MAX_APPROACH_DEG: Final = 3.0
 
+# Relaxed acceptance cap for tilted grasps: how far off vertical the wrist may lean when a
+# fingers-down pose is infeasible. Solving position-first (weight 0) and accepting up to this
+# angle opens the near-arm block the vertical cap threw away — ~37 fields, ranks 4-centre
+# through 8. See experiment-2-plan.md, "Grasp feasibility: vertical is too strict".
+MAX_TILT_DEG: Final = 45.0
+
 _IK_ITERATIONS: Final = 120
 _IK_DAMPING: Final = 1e-3
 _IK_MAX_STEP: Final = 0.3
@@ -57,6 +63,10 @@ _IK_RESTARTS: Final = 6
 # of them. Squares with no clean solution at all spend the whole budget proving it, which is
 # cheap enough (a few seconds each) to be worth paying for a correct verdict.
 _IK_SCREENED_RESTARTS: Final = 60
+# Restart budget for the min-tilt search. Position-first IK lands on a random tilt from the
+# continuum per seed, so the per-square minimum is the lowest over many restarts (the recount
+# method). Matched to the value the tilted pick-place prototype was validated at.
+_IK_TILT_RESTARTS: Final = 40
 _FD_EPS: Final = 1e-6
 
 # How far the roll joint should stay off its own limit. A pose on a stop is one the actuator
@@ -65,6 +75,15 @@ _FD_EPS: Final = 1e-6
 # residual nothing, because roll is the direction the fingers-down constraint leaves free. It is
 # a preference rather than a bound — a square whose only solution is clamped still gets one.
 MIN_LIMIT_MARGIN: Final = np.radians(2.0)
+
+# How far off the lowest achievable tilt a pose may sit and still be eligible when the caller
+# asks for the one nearest a preferred configuration. The min-tilt search returns a random roll
+# from the continuum each restart, so without a preference consecutive anchors land in unrelated
+# roll branches and the joint-space legs between them unwind the wrist the long way around — a
+# full turn when a square accepts a roll near one limit and the survey pose sits near the other.
+# A pawn is axially symmetric, so every roll grips it equally: spending a few degrees of extra
+# tilt to pick the roll the arm is already near removes the spin at no cost to the grasp.
+TILT_ROLL_BAND_DEG: Final = 6.0
 
 _ROLL: Final = ARM_JOINT_NAMES.index("wrist_roll")
 
@@ -81,15 +100,17 @@ class GraspPose:
     qpos: tuple[float, float, float, float, float]
     tcp_error: float
     approach_deg: float
+    max_approach_deg: float = MAX_APPROACH_DEG
 
     def is_within_tolerance(self) -> bool:
         """Report whether this pose is close enough to grip the square.
 
         Returns:
-            True when the TCP error and the approach angle both sit inside the module's
-            acceptance thresholds.
+            True when the TCP error and the approach angle both sit inside the acceptance
+            thresholds this pose was solved under (`max_approach_deg` is the vertical cap for a
+            fingers-down pose, or the relaxed tilt cap for a tilted one).
         """
-        return self.tcp_error <= MAX_TCP_ERROR and self.approach_deg <= MAX_APPROACH_DEG
+        return self.tcp_error <= MAX_TCP_ERROR and self.approach_deg <= self.max_approach_deg
 
 
 def finger_axis_site_frame(
@@ -150,6 +171,10 @@ class VerticalGraspSolver:
     residual is rank two, so the system is square in practice and wrist_roll stays free.
     The Jacobian is taken by finite differences: the residual mixes a site position with a
     rotated body axis, and the analytic form of the latter is easy to get sign-wrong.
+
+    Fingers-down is the default. Passing `weight=0` with a relaxed `max_approach_deg` instead
+    solves position-first and accepts whatever wrist tilt the square needs up to that cap — the
+    tilted-grasp mode that opens the squares no vertical pose reaches.
 
     Mutates the `data` it is constructed with.
     """
@@ -320,6 +345,7 @@ class VerticalGraspSolver:
         weight: float = 1.0,
         accept: Callable[[npt.NDArray[np.float64]], bool] | None = None,
         prefer: Sequence[float] | None = None,
+        max_approach_deg: float = MAX_APPROACH_DEG,
     ) -> tuple[npt.NDArray[np.float64], float, float]:
         """Search for the configuration that best grips a world-frame target from above.
 
@@ -343,6 +369,9 @@ class VerticalGraspSolver:
                 which is a coin toss between poses a quarter-turn apart. Given one, every
                 restart is tried and the closest acceptable pose to it is returned instead
                 (see `travel_cost`).
+            max_approach_deg: Largest tilt off vertical a pose may hold and still count as
+                solved. Defaults to the fingers-down cap; raise it (with `weight=0`) for a
+                tilted grasp on a square no vertical pose reaches.
 
         Returns:
             The chosen configuration in `ARM_JOINT_NAMES` order, its TCP error in metres, and
@@ -363,7 +392,7 @@ class VerticalGraspSolver:
             )
             qpos = self._refine(seed, target, weight)
             error, angle = self.measure(qpos, target)
-            solved = error <= MAX_TCP_ERROR and angle <= MAX_APPROACH_DEG
+            solved = error <= MAX_TCP_ERROR and angle <= max_approach_deg
             if accept is not None and solved and not accept(qpos):
                 continue
             if toward is not None and solved:
@@ -378,6 +407,81 @@ class VerticalGraspSolver:
         if nearest is not None:
             return nearest[1], nearest[2], nearest[3]
         return best_qpos, best_error, best_angle
+
+    def solve_min_tilt(
+        self,
+        target: npt.NDArray[np.float64],
+        rng: np.random.Generator,
+        accept: Callable[[npt.NDArray[np.float64]], bool] | None = None,
+        max_approach_deg: float = MAX_TILT_DEG,
+        restarts: int = _IK_TILT_RESTARTS,
+        tilt_target_deg: float | None = None,
+        prefer: Sequence[float] | None = None,
+    ) -> tuple[npt.NDArray[np.float64], float, float, bool]:
+        """Search the tilt continuum over a target for the pose at a chosen lean.
+
+        Solves position-first (weight 0) from many restarts, keeping every converged pose that
+        reaches the target within tolerance, leans no further than `max_approach_deg`, and comes
+        through `accept`. Among those it returns the one whose tilt is lowest, or — when
+        `tilt_target_deg` is given — the one whose tilt is nearest that angle, which is how a
+        sampler asks for a grasp deliberately leaned past the minimum.
+
+        Each seed lands on a random roll from the continuum, so the lowest-tilt pose carries an
+        arbitrary wrist roll. With `prefer` given, the tilt selection is widened to a band around
+        the best achievable tilt (`TILT_ROLL_BAND_DEG`) and the pose within it that turns the wrist
+        least from `prefer` is returned instead — the same `travel_cost` rule the fingers-down
+        `solve` uses, so successive anchors share a roll branch and the joint-space legs between
+        them stop spinning the gripper the long way around.
+
+        Args:
+            target: World point the TCP should sit at, metres.
+            rng: Source of the random restart seeds.
+            accept: Screen applied to converged, in-tolerance poses; see `solve`. A pose it
+                rejects is never selected.
+            max_approach_deg: Largest tilt off vertical a pose may hold and still count.
+            restarts: How many seeds to try; the minimum is only as honest as this is large.
+            tilt_target_deg: Lean to aim for, degrees off vertical. The nearest accepted pose to
+                it is returned; the lowest-tilt accepted pose is returned when omitted.
+            prefer: Configuration the arm is coming from. When given, the roll nearest it (within
+                `TILT_ROLL_BAND_DEG` of the best tilt) is chosen over the strictly minimum-tilt one.
+
+        Returns:
+            The chosen configuration in `ARM_JOINT_NAMES` order, its TCP error in metres, its
+            approach angle off vertical in degrees, and whether any pose was accepted at all.
+            When none was, the first three describe the closest attempt by position error and the
+            flag is False, so the caller can report how far off the square was.
+        """
+        target = np.asarray(target, dtype=np.float64)
+        accepted: list[tuple[float, npt.NDArray[np.float64], float, float]] = []
+        best_key = np.inf
+        fallback_qpos = np.array(self._index.arm_qpos, dtype=np.float64)
+        fallback_err, fallback_angle = np.inf, np.inf
+        for attempt in range(restarts):
+            seed = (
+                np.array(self._index.arm_qpos, dtype=np.float64)
+                if attempt == 0
+                else rng.uniform(self._lo, self._hi)
+            )
+            qpos = self._refine(seed, target, weight=0.0)
+            error, angle = self.measure(qpos, target)
+            if error < fallback_err:
+                fallback_qpos, fallback_err, fallback_angle = qpos, error, angle
+            if error > MAX_TCP_ERROR or angle > max_approach_deg:
+                continue
+            if accept is not None and not accept(qpos):
+                continue
+            key = abs(angle - tilt_target_deg) if tilt_target_deg is not None else angle
+            best_key = min(best_key, key)
+            accepted.append((key, qpos, error, angle))
+        if not accepted:
+            return fallback_qpos, fallback_err, fallback_angle, False
+        if prefer is None:
+            key, qpos, error, angle = min(accepted, key=lambda c: c[0])
+            return qpos, error, angle, True
+        toward = np.asarray(prefer, dtype=np.float64)
+        band = [c for c in accepted if c[0] <= best_key + TILT_ROLL_BAND_DEG]
+        _, qpos, error, angle = min(band, key=lambda c: self.travel_cost(c[1], toward))
+        return qpos, error, angle, True
 
     def track(
         self,
@@ -412,8 +516,10 @@ class VerticalGraspSolver:
         height: float = GRASP_HEIGHT,
         accept: Callable[[npt.NDArray[np.float64]], bool] | None = None,
         prefer: Sequence[float] | None = None,
+        weight: float = 1.0,
+        max_approach_deg: float = MAX_APPROACH_DEG,
     ) -> GraspPose:
-        """Solve a fingers-down pose over one square.
+        """Solve a grasp pose over one square, fingers-down by default.
 
         Args:
             square: Algebraic square name, e.g. "e4".
@@ -423,19 +529,30 @@ class VerticalGraspSolver:
             height: How far above the playing surface the TCP should sit, metres.
             accept: Screen applied to converged, in-tolerance poses; see `solve`.
             prefer: Configuration the arm is coming from; see `solve`.
+            weight: How hard the approach-axis error counts against position; see `solve`. Pass
+                0 for a tilted grasp so position is met and the wrist takes its natural tilt.
+            max_approach_deg: Largest tilt off vertical the pose may hold; see `solve`.
 
         Returns:
-            The pose settled on, carrying the error and approach angle it was reached at —
-            in tolerance or not.
+            The pose settled on, carrying the error and approach angle it was reached at and the
+            cap it was solved under — in tolerance or not.
         """
         target = board.square_to_world(square, board_pose).astype(np.float64)
         target[2] = board.surface_height + height
-        qpos, error, angle = self.solve(target, rng, accept=accept, prefer=prefer)
+        qpos, error, angle = self.solve(
+            target,
+            rng,
+            weight=weight,
+            accept=accept,
+            prefer=prefer,
+            max_approach_deg=max_approach_deg,
+        )
         return GraspPose(
             square=square,
             qpos=(qpos[0], qpos[1], qpos[2], qpos[3], qpos[4]),
             tcp_error=error,
             approach_deg=angle,
+            max_approach_deg=max_approach_deg,
         )
 
 

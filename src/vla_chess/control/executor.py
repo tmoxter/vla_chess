@@ -26,11 +26,27 @@ CONTROL_HZ: Final = 50.0
 
 # A solve this far off the interpolated target is treated as the solver having lost the path
 # rather than as tracking error: the anchor poses are exact, so millimetres here mean the
-# fingers-down constraint stopped being satisfiable somewhere between them.
+# fingers-down constraint stopped being satisfiable somewhere between them. This is the abort for
+# a fingers-down plan, whose Cartesian legs track exactly; a tilted plan grazes further and passes
+# `TILTED_IK_ABORT` to `run` instead, letting physics rather than the residual judge the outcome.
 MAX_IK_ERROR: Final = 0.005
+
+# The abort a sample-then-filter plan runs under. A tilted Cartesian leg tracks its eased approach
+# axis at a fraction of full weight, so it drifts tens of millimetres off the interpolated position
+# and still places the piece; this guard only kills a truly diverging rollout fast, and the
+# post-hoc validator decides whether what landed is a keep. Measured: clean tilted placements graze
+# ~20-24 mm, so 30 mm passes them while stopping a solve that has lost the arm entirely.
+TILTED_IK_ABORT: Final = 0.030
 
 # How far a piece that is not the one being moved may shift before the episode is a failure.
 MAX_BYSTANDER_DRIFT: Final = 0.005
+
+# How hard a tilted leg's IK tracks its approach axis against its position target. Full weight
+# holds the lean exactly but trades away millimetres of position at poses where the eased axis is
+# not perfectly achievable; a fraction guides the wrist enough to stay on the tilted IK branch
+# while leaving position near-exact. Only tilted legs use it — fingers-down legs track at the
+# solver's own default, which the vertical grasps are exact at.
+TILT_TRACK_WEIGHT: Final = 0.3
 
 # A stuck or diverging rollout has to end by itself rather than run until someone notices. The
 # budget is the executor's own work: capturing observations happens inside this loop through
@@ -57,6 +73,20 @@ class ExecutionDiagnostics:
     control_steps: int
     sim_steps: int
     wall_seconds: float
+
+
+@dataclass(frozen=True)
+class PlacementCheck:
+    """Where a moved piece ended up, and whether that counts as a placement.
+
+    The verdict a closed-loop rollout is scored on: the policy drove the arm for a fixed number
+    of frames with no abort bookkeeping, so success is purely "did the piece come to rest, upright,
+    on its target square".
+    """
+
+    final_square: str | None
+    settled: bool
+    placed: bool
 
 
 @dataclass(frozen=True)
@@ -136,6 +166,9 @@ class Executor:
         self._decimation = decimation
         self._scratch = mujoco.MjData(model)
         self._solver = VerticalGraspSolver(model, self._scratch, index)
+        # The fingers-down axis every Cartesian leg tracks toward unless the waypoint names its
+        # own (a tilted grasp). Captured so a tilted leg can be restored to it afterwards.
+        self._default_down = np.array(self._solver._down, dtype=np.float64, copy=True)
         self._qadr = np.array(
             [model.jnt_qposadr[index.arm_joint_id[name]] for name in ARM_JOINT_NAMES],
             dtype=np.int64,
@@ -182,6 +215,19 @@ class Executor:
     def _arm_qpos(self, data: mujoco.MjData) -> npt.NDArray[np.float64]:
         """Read the five arm joints out of a state, in `ARM_JOINT_NAMES` order."""
         return np.asarray(data.qpos[self._qadr], dtype=np.float64)
+
+    def _approach_axis(self, qpos: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Measure the direction the fingers point in at an arm configuration.
+
+        Args:
+            qpos: Arm configuration to measure, in `ARM_JOINT_NAMES` order.
+
+        Returns:
+            Unit vector in the world frame, used as the start of a tilted leg's eased axis so
+            the wrist rotates from where it is rather than snapping to the target lean.
+        """
+        self._solver.forward(np.asarray(qpos, dtype=np.float64))
+        return self._solver.approach_axis()
 
     def _state(self, data: mujoco.MjData) -> npt.NDArray[np.float64]:
         """Read one recorded state out of the simulator.
@@ -237,6 +283,7 @@ class Executor:
         plan: Plan,
         on_control_step: Callable[[int, mujoco.MjData], None] | None = None,
         wall_clock_limit: float = WALL_CLOCK_LIMIT,
+        ik_abort: float = MAX_IK_ERROR,
     ) -> ExecutionResult:
         """Execute a plan, recording one state/action pair per control step.
 
@@ -252,6 +299,10 @@ class Executor:
                 cameras, and the time it spends is excluded from the wall-clock budget.
             wall_clock_limit: Seconds of the executor's own work allowed before the run is
                 aborted as stuck.
+            ik_abort: How far a Cartesian leg's solve may sit off its interpolated target before
+                the run is aborted as diverged. Defaults to the fingers-down `MAX_IK_ERROR`; a
+                tilted sample-then-filter plan passes `TILTED_IK_ABORT` so a leg that grazes the
+                gate but places the piece is left for the validator to judge.
 
         Returns:
             The rollout: its states and actions, the phase each step belonged to, whether the
@@ -289,6 +340,19 @@ class Executor:
                 if waypoint.position is not None
                 else None
             )
+            # A Cartesian leg with an approach axis is a tilted grasp: track toward that axis
+            # instead of straight down, so the wrist holds the lean the anchor was solved at
+            # rather than being pulled back toward vertical and losing the IK branch. The axis is
+            # eased from where the wrist starts the leg to the waypoint's, so a change of lean
+            # (a source tilt handed off to a different target tilt across transport) rotates over
+            # the leg rather than jumping on its first step. Legs with no axis are flown
+            # fingers-down, the default every vertical grasp relies on.
+            start_axis = np.array(self._approach_axis(start_arm), dtype=np.float64)
+            target_axis = (
+                np.array(waypoint.approach_axis, dtype=np.float64)
+                if waypoint.approach_axis is not None
+                else None
+            )
             target_arm = (
                 np.array(waypoint.qpos, dtype=np.float64) if waypoint.qpos is not None else None
             )
@@ -297,9 +361,16 @@ class Executor:
                 blend = minimum_jerk(leg / legs)
                 if target_tcp is not None:
                     point = start_tcp + blend * (target_tcp - start_tcp)
-                    solved, error, _ = self._solver.track(point, arm)
+                    if target_axis is not None:
+                        eased = start_axis + blend * (target_axis - start_axis)
+                        self._solver._down = eased / float(np.linalg.norm(eased))
+                        weight = TILT_TRACK_WEIGHT
+                    else:
+                        self._solver._down = self._default_down
+                        weight = 1.0
+                    solved, error, _ = self._solver.track(point, arm, weight=weight)
                     max_ik = max(max_ik, error)
-                    if error > MAX_IK_ERROR:
+                    if error > ik_abort:
                         abort = AbortReason.IK_DIVERGED
                     arm = solved
                 else:
@@ -333,12 +404,8 @@ class Executor:
             if abort is not None:
                 break
 
-        final_square = self._index.board.world_to_square(
-            data.xpos[piece_body], self._index.board_pose
-        )
-        placed = (
-            abort is None and final_square == plan.spec.target and self._settled(data, piece_body)
-        )
+        check = self.placement(data, plan.spec.source, plan.spec.target)
+        placed = abort is None and check.placed
         return ExecutionResult(
             states=np.asarray(states, dtype=np.float64).reshape(len(states), 6),
             actions=np.asarray(actions, dtype=np.float64).reshape(len(actions), 6),
@@ -346,7 +413,7 @@ class Executor:
             phase_boundaries=_boundaries(phases),
             grasped=grasped,
             placed=placed,
-            final_square=final_square,
+            final_square=check.final_square,
             abort_reason=abort,
             diagnostics=ExecutionDiagnostics(
                 max_tracking_error=max_tracking,
@@ -355,6 +422,34 @@ class Executor:
                 sim_steps=len(states) * self._decimation,
                 wall_seconds=time.monotonic() - started,
             ),
+        )
+
+    def placement(self, data: mujoco.MjData, source: str, target: str) -> PlacementCheck:
+        """Score where the piece that started on `source` has come to rest.
+
+        The success test the closed-loop rollout eval uses: it reads the piece's current pose and
+        asks whether it is standing, upright, on `target`. This is the same final-square and
+        settled check `run` applies, factored out so the policy rollout scores a move the identical
+        way the oracle does — minus the abort bookkeeping a free-running rollout has no notion of.
+
+        Args:
+            data: Stepped state to read the piece's pose from.
+            source: Square the piece started on, used to look its body up.
+            target: Square the move was meant to end on.
+
+        Returns:
+            The resting square (or None if off-board), whether it settled, and whether that is a
+            placement on `target`.
+        """
+        piece_body = self._index.piece_body_id[source]
+        final_square = self._index.board.world_to_square(
+            data.xpos[piece_body], self._index.board_pose
+        )
+        settled = self._settled(data, piece_body)
+        return PlacementCheck(
+            final_square=final_square,
+            settled=settled,
+            placed=final_square == target and settled,
         )
 
     def _settled(self, data: mujoco.MjData, piece_body: int) -> bool:

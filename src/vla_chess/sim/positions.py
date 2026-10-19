@@ -14,6 +14,24 @@ BACK_RANK: Sequence[PieceType] = (
 )
 
 
+def single_pawn_position(
+    square: str, color: PieceColor = PieceColor.BLACK
+) -> tuple[PiecePlacement, ...]:
+    """Build a board holding one pawn and nothing else.
+
+    The bare board the "move the pawn one field forward" demonstrations are recorded on: with
+    no other pieces to name against, the task is the push itself, not a coordinate.
+
+    Args:
+        square: Algebraic square the pawn stands on, e.g. "d7".
+        color: The pawn's colour; black by default, matching the opening's back ranks.
+
+    Returns:
+        A one-element layout, ready to pass as the runner's `pieces`.
+    """
+    return (PiecePlacement(square, PieceType.PAWN, color),)
+
+
 def starting_position() -> tuple[PiecePlacement, ...]:
     """Build the initial chess position.
 

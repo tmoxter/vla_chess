@@ -56,9 +56,32 @@ torch = { version = "==2.11.0", index = "https://download.pytorch.org/whl/cpu" }
 torchvision = { version = "==0.26.0", index = "https://download.pytorch.org/whl/cpu" }
 torchcodec = { version = "==0.11.1", index = "https://download.pytorch.org/whl/cpu" }
 
+# Policy-inference environment for the SmolVLA rollout eval. Mirrors `datagen`'s pins but adds
+# lerobot's `smolvla` extra (transformers/num2words/accelerate) so we can load and run a fine-tuned
+# checkpoint. Kept in its own solve-group so pulling in transformers can never perturb the
+# end-to-end-verified `datagen` writer env. torch stays on the CPU index — this host has no GPU.
+[tool.pixi.feature.eval.dependencies]
+numpy = ">=1.26,<2.3"
+packaging = ">=24.2,<26"
+fsspec = ">=2023.1.0,<=2026.2.0"
+
+[tool.pixi.feature.eval.pypi-dependencies]
+lerobot = { version = "==0.6.1", extras = ["dataset", "smolvla"] }
+torch = { version = "==2.11.0", index = "https://download.pytorch.org/whl/cpu" }
+torchvision = { version = "==0.26.0", index = "https://download.pytorch.org/whl/cpu" }
+torchcodec = { version = "==0.11.1", index = "https://download.pytorch.org/whl/cpu" }
+
+# Experiment tracking: a local MLflow with a SQLite backend store. Kept in its own solve-group so
+# MLflow's web stack never perturbs the training/eval/writer envs. The pod emits a metrics JSONL
+# during training (on its persistent volume); a local ingest script replays it into this SQLite DB.
+[tool.pixi.feature.track.pypi-dependencies]
+mlflow = ">=2.16"
+
 [tool.pixi.environments]
 default = { features = ["dev"], solve-group = "default" }
 datagen = { features = ["dev", "datagen"], solve-group = "datagen" }
+eval = { features = ["dev", "eval"], solve-group = "eval" }
+track = { features = ["track"], solve-group = "track" }
 
 [tool.pixi.tasks]
 install-hooks = "git config core.hooksPath .githooks"
@@ -79,6 +102,12 @@ generate-episode = "python -m vla_chess.cli.generate_episode"
 # `pixi run -e datagen generate-dataset --episodes 30`.
 generate-dataset = "python -m vla_chess.cli.generate_dataset"
 search-survey-pose = "python -m vla_chess.cli.search_survey_pose"
+# Closed-loop SmolVLA rollout eval; imports lerobot, so it runs in the eval env:
+# `pixi run -e eval eval-rollout --episode 0 --out runpod/artifacts/rollout-ep0.mp4`.
+eval-rollout = "python -m vla_chess.cli.eval_rollout"
+# Local MLflow UI + tracking server (SQLite backend). Run in the track env:
+# `pixi run -e track mlflow-server`, then open http://127.0.0.1:5000.
+mlflow-server = "mlflow server --backend-store-uri sqlite:///mlflow/mlflow.db --default-artifact-root ./mlflow/artifacts --host 127.0.0.1 --port 5000"
 typecheck = "mypy src"
 lint = "ruff check . && ruff format --check ."
 format = "ruff format ."
@@ -115,10 +144,11 @@ extra_checks = true
 module = ["mujoco", "mujoco.*", "scipy", "scipy.*"]
 ignore_missing_imports = true
 
-# lerobot is only installed in the datagen env, but `mypy src` runs in default; treat it as an
-# untyped third-party module there rather than failing on the missing import.
+# lerobot, torch and huggingface_hub are only installed in the datagen/eval envs, but `mypy src`
+# runs in default; treat them as untyped third-party modules there rather than failing on the
+# missing import (they are imported lazily inside the eval-only rollout CLI).
 [[tool.mypy.overrides]]
-module = ["lerobot.*"]
+module = ["lerobot.*", "torch", "huggingface_hub"]
 ignore_missing_imports = true
 
 [tool.ruff]
@@ -132,3 +162,6 @@ allowed-confusables = ["×"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ANN401"]
+# The rollout CLI drives a lerobot policy object that is only typed in the eval env; its handles
+# (policy/pre/post) cross into this module as `Any`, which is exactly what ANN401 guards against.
+"src/vla_chess/cli/eval_rollout.py" = ["ANN401"]

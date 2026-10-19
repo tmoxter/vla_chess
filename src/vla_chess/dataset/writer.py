@@ -15,6 +15,11 @@ from vla_chess.sim.scene import ARM_JOINT_NAMES
 DEFAULT_REPO_ID: Final = "vla_chess/chess_pick_place"
 DEFAULT_ROBOT_TYPE: Final = "so101"
 
+# The git tag SmolVLA training looks for on a dataset repo. lerobot's `get_safe_version` resolves
+# `--dataset.repo_id` to the tag matching the dataset's `codebase_version`; a push that leaves it
+# off trains against nothing. `LeRobotDataset.push_to_hub(tag_version=True)` creates it for us.
+CODEBASE_VERSION_TAG: Final = "v3.0"
+
 # The six numbers a state and an action carry, in the order the executor writes them: the five
 # arm joints, then the jaw. These name the state/action feature columns in the dataset.
 STATE_FEATURE_NAMES: Final = (*ARM_JOINT_NAMES, "gripper")
@@ -70,6 +75,33 @@ def episode_features(ep: Episode) -> dict[str, dict[str, Any]]:
             "names": list(STATE_FEATURE_NAMES),
         }
     return features
+
+
+def push_dataset(
+    root: Path,
+    repo_id: str,
+    *,
+    private: bool = True,
+    tags: list[str] | None = None,
+) -> None:
+    """Upload a finished on-disk dataset to the Hub, tagged with the codebase version.
+
+    Loads the dataset serialized at `root` and pushes it through `LeRobotDataset.push_to_hub`,
+    whose `tag_version=True` creates the `v3.0` git tag training resolves the repo id against.
+    A raw folder upload would skip that tag and leave the dataset untrainable.
+
+    Args:
+        root: Directory holding the finished dataset (what `serialize` wrote). It must already be
+            finalized — a half-written dataset silently falls back to a Hub download and fails.
+        repo_id: Hub repository id to push to; must match the id stamped into the dataset so the
+            push and the dataset's own metadata agree.
+        private: Whether to create the Hub repository private.
+        tags: Optional dataset-card tags; the version git tag is always created regardless.
+    """
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    dataset = LeRobotDataset(repo_id, root=root)
+    dataset.push_to_hub(private=private, tags=tags, tag_version=True)
 
 
 class LeRobotWriter:

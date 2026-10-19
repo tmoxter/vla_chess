@@ -10,43 +10,48 @@ import mujoco
 import numpy as np
 import numpy.typing as npt
 
-REQUIRED_GL_BACKEND: Final = "osmesa"
+# Offscreen backends we support: 'osmesa' is CPU software rendering (no GPU/display needed, the
+# local box); 'egl' is headless GPU rendering (a rented GPU pod), 100-1000x faster for datagen.
+# 'glfw' still can't work headless. osmesa stays the default so local behaviour is unchanged.
+SUPPORTED_GL_BACKENDS: Final = ("osmesa", "egl")
+DEFAULT_GL_BACKEND: Final = "osmesa"
 
 RgbFrame = npt.NDArray[np.uint8]
 
 _BACKEND_HELP: Final = (
-    "This host has no GPU and no display, so 'egl' and 'glfw' cannot work; "
-    f"export MUJOCO_GL={REQUIRED_GL_BACKEND} before importing vla_chess.render."
+    "Set MUJOCO_GL=osmesa for CPU software rendering (no GPU/display, e.g. this box) or "
+    "MUJOCO_GL=egl for headless GPU rendering (a GPU pod), before importing vla_chess.render."
 )
 
 
 def check_gl_backend() -> None:
-    """Raise unless the MUJOCO_GL environment variable selects the osmesa backend.
+    """Raise unless MUJOCO_GL selects a supported offscreen backend (osmesa or egl).
 
     Raises:
-        RuntimeError: If the variable is unset or names any other backend.
+        RuntimeError: If the variable is unset or names an unsupported backend.
     """
     backend = os.environ.get("MUJOCO_GL")
     found = "unset" if backend is None else repr(backend)
-    if backend != REQUIRED_GL_BACKEND:
+    if backend not in SUPPORTED_GL_BACKENDS:
         raise RuntimeError(
-            f"MUJOCO_GL must be {REQUIRED_GL_BACKEND!r}, but it is {found}. {_BACKEND_HELP}"
+            f"MUJOCO_GL must be one of {SUPPORTED_GL_BACKENDS}, but it is {found}. {_BACKEND_HELP}"
         )
 
 
 def _check_resolved_backend() -> None:
-    """Raise unless the GL backend mujoco actually bound is osmesa.
+    """Raise unless the GL backend mujoco actually bound matches the requested supported one.
 
     Raises:
-        RuntimeError: If mujoco resolved a different backend, which setting MUJOCO_GL now
-            cannot undo.
+        RuntimeError: If mujoco resolved a backend that is unsupported, or differs from the one
+            MUJOCO_GL asked for (it is read once at first GL init, so a later change is silent).
     """
     import mujoco.gl_context
 
+    requested = os.environ.get("MUJOCO_GL")
     resolved = mujoco.gl_context.GLContext.__module__.rsplit(".", 1)[-1]
-    if resolved != REQUIRED_GL_BACKEND:
+    if resolved not in SUPPORTED_GL_BACKENDS or resolved != requested:
         raise RuntimeError(
-            f"mujoco bound the {resolved!r} GL backend, but {REQUIRED_GL_BACKEND!r} is required. "
+            f"mujoco bound the {resolved!r} GL backend, but MUJOCO_GL requested {requested!r}. "
             "MUJOCO_GL is read once, when mujoco first initialises its GL context, so setting it "
             f"afterwards has no effect. {_BACKEND_HELP}"
         )

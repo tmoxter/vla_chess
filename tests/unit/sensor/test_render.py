@@ -8,7 +8,6 @@ import numpy as np
 import pytest
 
 from vla_chess.sensor.render import (
-    REQUIRED_GL_BACKEND,
     CameraSpec,
     FreeCameraPose,
     Renderer,
@@ -38,41 +37,42 @@ def fixed_camera(width: int = 64, height: int = 64) -> CameraSpec:
 
 
 class TestBackendCheck:
-    @pytest.mark.parametrize("backend", ["egl", "glfw", "", "OSMESA"])
-    def test_non_osmesa_backend_raises_naming_the_required_value(
+    @pytest.mark.parametrize("backend", ["glfw", "", "OSMESA", "EGL"])
+    def test_unsupported_backend_raises_naming_the_variable(
         self, backend: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Any MUJOCO_GL value other than osmesa is rejected with the required value named."""
+        """Any MUJOCO_GL value outside the supported set is rejected, naming the variable."""
         monkeypatch.setenv("MUJOCO_GL", backend)
-        with pytest.raises(RuntimeError, match=REQUIRED_GL_BACKEND) as excinfo:
+        with pytest.raises(RuntimeError, match="MUJOCO_GL") as excinfo:
             check_gl_backend()
-        assert "MUJOCO_GL" in str(excinfo.value)
+        assert "osmesa" in str(excinfo.value) and "egl" in str(excinfo.value)
 
     def test_unset_backend_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """An unset MUJOCO_GL is rejected rather than left to mujoco's autodetection."""
         monkeypatch.delenv("MUJOCO_GL", raising=False)
-        with pytest.raises(RuntimeError, match=REQUIRED_GL_BACKEND):
+        with pytest.raises(RuntimeError, match="MUJOCO_GL"):
             check_gl_backend()
 
-    def test_osmesa_backend_passes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The required backend value is accepted."""
-        monkeypatch.setenv("MUJOCO_GL", REQUIRED_GL_BACKEND)
+    @pytest.mark.parametrize("backend", ["osmesa", "egl"])
+    def test_supported_backend_passes(self, backend: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Both supported backends (osmesa for CPU, egl for GPU) are accepted by the env check."""
+        monkeypatch.setenv("MUJOCO_GL", backend)
         check_gl_backend()
 
-    def test_constructing_renderer_with_wrong_backend_raises(
+    def test_constructing_renderer_with_unsupported_backend_raises(
         self, box_model: mujoco.MjModel, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Renderer construction re-checks the backend instead of trusting import time."""
-        monkeypatch.setenv("MUJOCO_GL", "egl")
-        with pytest.raises(RuntimeError, match=REQUIRED_GL_BACKEND):
+        monkeypatch.setenv("MUJOCO_GL", "glfw")
+        with pytest.raises(RuntimeError, match="MUJOCO_GL"):
             Renderer(box_model, [fixed_camera()])
 
-    def test_importing_module_with_wrong_backend_raises(self) -> None:
-        """Importing vla_chess.sensor.render under a non-osmesa backend fails at import time."""
+    def test_importing_module_with_unsupported_backend_raises(self) -> None:
+        """Importing vla_chess.sensor.render under an unsupported backend fails at import time."""
         script = textwrap.dedent(
             """
             import os
-            os.environ["MUJOCO_GL"] = "egl"
+            os.environ["MUJOCO_GL"] = "glfw"
             try:
                 import vla_chess.sensor.render  # noqa: F401
             except RuntimeError as exc:
@@ -85,7 +85,7 @@ class TestBackendCheck:
             [sys.executable, "-c", script], capture_output=True, text=True, check=False
         )
         assert proc.returncode == 0, proc.stderr
-        assert REQUIRED_GL_BACKEND in proc.stdout
+        assert "MUJOCO_GL" in proc.stdout
 
 
 class TestCameraSpecValidation:

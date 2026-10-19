@@ -2,13 +2,15 @@ import json
 
 import mujoco
 import numpy as np
+import numpy.typing as npt
 import pytest
 
-from vla_chess.control.planner import ArmQpos
+from vla_chess.control.planner import ArmQpos, _above
 from vla_chess.grasp.solver import (
     GRASP_HEIGHT,
     MAX_APPROACH_DEG,
     MAX_TCP_ERROR,
+    MAX_TILT_DEG,
     MIN_LIMIT_MARGIN,
     REFERENCE_BOARD_POSE,
     REFERENCE_GRASPS_PATH,
@@ -225,3 +227,98 @@ class TestPreferredSolutions:
         solver, _, index = solver_scene
         for pose in rolls_over(solver, index, range(3), BIRDS_EYE_ARM_QPOS):
             assert solver.free_margin(np.asarray(pose.qpos)) >= MIN_LIMIT_MARGIN
+
+
+# Squares no fingers-down pose reaches (OUT_OF_REACH_FRONTIER). All four are position-reachable
+# once the wrist may tilt, but the tilt each needs is a function of the grasp geometry: with the
+# pawn's pinch offset a5 grasps at a modest ~10 deg, while d4/e4 land near ~47 deg — past the
+# 45 deg budget. So position-reachable is the whole frontier; graspable-within-budget is a
+# subset. `a5` is the square used to assert an actual in-budget tilted grasp.
+FRONTIER_SQUARES = ("a5", "d4", "e4")
+IN_BUDGET_TILTED_SQUARE = "a5"
+
+
+class TestTiltedGrasp:
+    """The relaxed mode: solve position-first and accept the natural wrist tilt up to the cap."""
+
+    def test_vertical_mode_leaves_the_frontier_out_of_reach(self, solver_scene: Scene) -> None:
+        solver, _, index = solver_scene
+        for square in FRONTIER_SQUARES:
+            pose = solver.solve_square(
+                square, index.board, index.board_pose, np.random.default_rng(0)
+            )
+            assert not pose.is_within_tolerance()
+
+    def test_tilted_mode_reaches_the_frontier_positions(self, solver_scene: Scene) -> None:
+        # Relaxing only the wrist orientation is enough to put the TCP on squares vertical could
+        # not reach at all — position is met across the whole frontier.
+        solver, _, index = solver_scene
+        for square in FRONTIER_SQUARES:
+            pose = solver.solve_square(
+                square,
+                index.board,
+                index.board_pose,
+                np.random.default_rng(0),
+                weight=0.0,
+                max_approach_deg=MAX_TILT_DEG,
+            )
+            assert pose.tcp_error <= MAX_TCP_ERROR
+
+    def test_tilted_mode_grips_an_in_budget_square_off_vertical(self, solver_scene: Scene) -> None:
+        # a5 is unreachable fingers-down but grasps within the tilt budget: a pose the vertical
+        # cap would reject, accepted because it leans under 45 deg.
+        solver, _, index = solver_scene
+        pose = solver.solve_square(
+            IN_BUDGET_TILTED_SQUARE,
+            index.board,
+            index.board_pose,
+            np.random.default_rng(0),
+            weight=0.0,
+            max_approach_deg=MAX_TILT_DEG,
+        )
+        assert pose.is_within_tolerance()
+        assert MAX_APPROACH_DEG < pose.approach_deg <= MAX_TILT_DEG
+
+
+class TestPreferredTiltedSolutions:
+    """The min-tilt search leaves roll free too, so a preference settles which branch it picks.
+
+    Without one, consecutive anchors land in unrelated roll branches — a grasp near one roll stop
+    while the survey pose sits near the other — and the joint-space legs between them spin the
+    wrist the long way around. A preference pulls the chosen roll toward where the arm already is,
+    which a pawn's axial symmetry makes free.
+    """
+
+    def _target(self, index: SceneIndex) -> npt.NDArray[np.float64]:
+        return np.asarray(
+            _above(index.board, PREFERENCE_SQUARE, index.board_pose, GRASP_HEIGHT),
+            dtype=np.float64,
+        )
+
+    def test_a_preferred_tilted_solve_still_reaches_the_square(self, solver_scene: Scene) -> None:
+        solver, _, index = solver_scene
+        _, error, _, ok = solver.solve_min_tilt(
+            self._target(index),
+            np.random.default_rng(0),
+            max_approach_deg=MAX_TILT_DEG,
+            prefer=BIRDS_EYE_ARM_QPOS,
+        )
+        assert ok
+        assert error <= MAX_TCP_ERROR
+
+    def test_a_preference_turns_the_wrist_less(self, solver_scene: Scene) -> None:
+        # Same restart set for both, so the preferred solve only reselects among the poses the
+        # unpreferred one already found: it can never turn the wrist further from the survey roll.
+        solver, _, index = solver_scene
+        roll = ARM_JOINT_NAMES.index("wrist_roll")
+        survey_roll = BIRDS_EYE_ARM_QPOS[roll]
+        free, *_ = solver.solve_min_tilt(
+            self._target(index), np.random.default_rng(0), max_approach_deg=MAX_TILT_DEG
+        )
+        biased, *_ = solver.solve_min_tilt(
+            self._target(index),
+            np.random.default_rng(0),
+            max_approach_deg=MAX_TILT_DEG,
+            prefer=BIRDS_EYE_ARM_QPOS,
+        )
+        assert abs(biased[roll] - survey_roll) < abs(free[roll] - survey_roll)

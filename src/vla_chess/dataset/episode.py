@@ -10,9 +10,11 @@ from typing import Final
 
 import numpy as np
 
-from vla_chess.control.executor import CONTROL_HZ, ExecutionResult, Executor
-from vla_chess.control.planner import ArmQpos, MoveSpec, plan_move
+from vla_chess.control.executor import CONTROL_HZ, TILTED_IK_ABORT, ExecutionResult, Executor
+from vla_chess.control.planner import ArmQpos, MoveSpec, PlanInfeasible, plan_move
+from vla_chess.control.sampling import SampleKnobs, plan_candidate, sample_candidates
 from vla_chess.dataset.observe import DEFAULT_FPS, Frame, ObservationRecorder
+from vla_chess.dataset.validate import Validation, infeasible, validate
 from vla_chess.grasp.solver import VerticalGraspSolver
 from vla_chess.sensor.render import CameraSpec, Renderer
 from vla_chess.sim.positions import starting_position
@@ -58,6 +60,23 @@ class Episode:
             `Episode`, since the frames of a failure are worth keeping.
         """
         return self.execution.succeeded
+
+
+@dataclass(frozen=True)
+class FunnelOutcome:
+    """What one move's sample-then-filter funnel produced: a kept episode, or none, plus the log."""
+
+    episode: Episode | None
+    attempts: tuple[Validation, ...]
+
+    @property
+    def accepted(self) -> bool:
+        """Report whether any candidate placed the piece.
+
+        Returns:
+            True when the funnel kept an episode.
+        """
+        return self.episode is not None
 
 
 def move_scene_description(
@@ -184,6 +203,70 @@ class EpisodeRunner:
             engine_version=self._engine_version,
             fps=self._fps,
         )
+
+    def run_funnel(
+        self, move: MoveSpec, knobs: SampleKnobs, *, base_seed: int = 0
+    ) -> FunnelOutcome:
+        """Sample candidates for one move, execute each, and record the first that places the piece.
+
+        The funnel that replaces the a-priori gate: candidates are drawn from a spread of grasp
+        leans and placement offsets, executed under the relaxed tilted IK abort, and judged by
+        physics. Each attempt is run once without rendering to find a keeper; only the accepted
+        candidate is re-run with the cameras attached, so rendering — the expensive half — is paid
+        only for an episode that is kept.
+
+        Args:
+            move: The move to demonstrate, on the runner's board layout.
+            knobs: The distribution the candidates are drawn from.
+            base_seed: Seed of the move's first candidate; each attempt offsets from it.
+
+        Returns:
+            The outcome: the recorded episode when a candidate placed the piece (None otherwise),
+            and the verdict on every attempt up to and including the keeper, for the yield log.
+
+        Raises:
+            ValueError: If the source square does not carry the move's piece.
+        """
+        description = move_scene_description(
+            move, self._pieces, self._board_pose, self._survey_qpos
+        )
+        model, index = build_scene(description)
+        candidates = sample_candidates(move, knobs, base_seed, np.random.default_rng(base_seed))
+        executor = Executor(model, index, control_hz=self._control_hz)
+
+        attempts: list[Validation] = []
+        for candidate in candidates:
+            plan_data = make_data(model, index)
+            solver = VerticalGraspSolver(model, plan_data, index)
+            try:
+                plan, quality = plan_candidate(
+                    candidate, model, plan_data, index, solver, max_tilt_deg=knobs.max_tilt_deg
+                )
+            except PlanInfeasible:
+                attempts.append(infeasible(candidate))
+                continue
+            dry = executor.run(make_data(model, index), plan, ik_abort=TILTED_IK_ABORT)
+            verdict = validate(candidate, quality, dry)
+            attempts.append(verdict)
+            if not verdict.accepted:
+                continue
+            data = make_data(model, index)
+            with Renderer(model, self._cameras) as renderer:
+                recorder = ObservationRecorder(renderer, fps=self._fps, control_hz=self._control_hz)
+                result = executor.run(
+                    data, plan, on_control_step=recorder.on_control_step, ik_abort=TILTED_IK_ABORT
+                )
+                frames = recorder.frames(result)
+            episode = Episode(
+                spec=move,
+                instruction=plan.instruction,
+                frames=frames,
+                execution=result,
+                engine_version=self._engine_version,
+                fps=self._fps,
+            )
+            return FunnelOutcome(episode=episode, attempts=tuple(attempts))
+        return FunnelOutcome(episode=None, attempts=tuple(attempts))
 
     def run_all(self, specs: Sequence[MoveSpec], *, base_seed: int = 0) -> Iterator[Episode]:
         """Run a list of moves, one episode each, in order.

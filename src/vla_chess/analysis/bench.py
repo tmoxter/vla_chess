@@ -10,7 +10,7 @@ from typing import Final
 import mujoco
 
 from vla_chess import paths
-from vla_chess.sensor.render import REQUIRED_GL_BACKEND, CameraSpec, Renderer
+from vla_chess.sensor.render import DEFAULT_GL_BACKEND, CameraSpec, Renderer
 
 MIN_CAMERA_FPS: Final = 4.0
 RSS_CEILING_BYTES: Final = 1_600_000_000
@@ -124,7 +124,7 @@ class HostInfo:
             total_ram_bytes=meminfo["MemTotal:"] * 1024,
             available_ram_bytes=meminfo["MemAvailable:"] * 1024,
             mujoco_version=mujoco.__version__,
-            gl_backend=REQUIRED_GL_BACKEND,
+            gl_backend=os.environ.get("MUJOCO_GL", DEFAULT_GL_BACKEND),
             timestamp=datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         )
 

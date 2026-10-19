@@ -11,7 +11,12 @@ import mujoco
 import numpy as np
 import numpy.typing as npt
 
-from vla_chess.grasp.solver import GRASP_HEIGHT, VerticalGraspSolver
+from vla_chess.grasp.solver import (
+    GRASP_HEIGHT,
+    MAX_APPROACH_DEG,
+    MAX_TILT_DEG,
+    VerticalGraspSolver,
+)
 from vla_chess.sim.collision import (
     baseline_self_pairs,
     contacts_at_pose,
@@ -58,6 +63,18 @@ GRIPPER_SHUT: Final = 0.0
 # friction alone carried it away with the retreat until the hand backed off first.
 GRASP_STANDOFF: Final = 0.005
 
+# How far a tilted hover backs off its grasp or place pose, along the approach axis rather than
+# straight up: a tilted pose that only exists near grasp height cannot be reached at a vertical
+# hover, so the hover is a pure translation back along the fingers. Kept under the ~65 mm
+# fingers-down ceiling — 60 mm put the source hover out of reach and the descent started from
+# garbage. See experiment-2-plan.md, Step 2.
+HOVER_ALONG_AXIS: Final = 0.040
+
+# How far above the surface the piece's foot is aimed at release. A tilted grasp leans the gripped
+# piece with the wrist, so the place aims the foot (not the TCP) at the square and lets it down to
+# just above the board, where a slightly leaned piece still settles upright on the target.
+RELEASE_GAP: Final = 0.003
+
 
 class Phase(Enum):
     SURVEY_START = "survey_start"
@@ -79,6 +96,10 @@ class Waypoint:
     A waypoint is either Cartesian (`position`, a world TCP target reached fingers-down) or
     joint-space (`qpos`), never both. Joint-space legs are for the transits between the survey
     pose and the board, where no fingers-down TCP target describes the motion.
+
+    A Cartesian leg may also name an `approach_axis`: the unit direction the fingers should
+    point along while it is flown, for a tilted grasp on a square no fingers-down pose reaches.
+    Left unset, the leg is flown fingers-down, the default every vertical grasp uses.
     """
 
     phase: Phase
@@ -86,15 +107,21 @@ class Waypoint:
     gripper: float
     position: tuple[float, float, float] | None = None
     qpos: ArmQpos | None = None
+    approach_axis: tuple[float, float, float] | None = None
 
     def __post_init__(self) -> None:
         """Reject a leg that says nowhere to go, or takes no time getting there.
 
         Raises:
             ValueError: If the waypoint carries neither or both of a position and a
-                configuration, if its duration is not positive, or if its jaw command falls
-                outside the normalised range.
+                configuration, if its duration is not positive, if its jaw command falls
+                outside the normalised range, or if an approach axis rides a joint-space leg.
         """
+        if self.approach_axis is not None and self.position is None:
+            raise ValueError(
+                f"{self.phase.value}: approach_axis only applies to a Cartesian leg, "
+                "but this waypoint carries a qpos"
+            )
         if (self.position is None) == (self.qpos is None):
             raise ValueError(
                 f"{self.phase.value}: a waypoint takes exactly one of position or qpos, "
@@ -139,6 +166,10 @@ class MoveSpec:
     release_duration: float = 1.2
     retreat_duration: float = 1.2
     return_duration: float = 2.5
+    # Overrides the square-naming default label. Set it when the demonstration teaches a task
+    # phrased without coordinates — a lone pawn pushed forward is told "move the pawn one field
+    # forward", not "from d7 to d6" — so the instruction matches what the scene actually shows.
+    instruction_override: str | None = None
 
     def __post_init__(self) -> None:
         """Reject a move no plan can be laid out for.
@@ -158,8 +189,11 @@ class MoveSpec:
         """Phrase this move as the episode's task string.
 
         Returns:
-            One natural-language sentence naming the piece, its square and its destination.
+            `instruction_override` verbatim when one is set; otherwise one natural-language
+            sentence naming the piece, its square and its destination.
         """
+        if self.instruction_override is not None:
+            return self.instruction_override
         return f"move the {self.piece_type.value} from {self.source} to {self.target}"
 
 
@@ -411,6 +445,275 @@ def plan_move(
         hover_target_qpos=hover_target,
         instruction=spec.instruction(),
     )
+
+
+@dataclass(frozen=True)
+class PlanQuality:
+    """What a tilted plan's anchors cost, for the validator to weigh a run against.
+
+    A plan is built best-effort — the lean each anchor needed is recorded rather than gated on —
+    so this is how far from a clean vertical grasp the attempt started, before physics has run.
+    """
+
+    grasp_tilt_deg: float
+    place_tilt_deg: float
+    grasp_residual: float
+    place_residual: float
+
+    @property
+    def fingers_down(self) -> bool:
+        """Report whether both anchors are effectively vertical grasps.
+
+        Returns:
+            True when neither the grasp nor the place leans past the fingers-down cap, i.e. the
+            sampled move happened to land on a pose the old vertical planner could also have flown.
+        """
+        return self.grasp_tilt_deg <= MAX_APPROACH_DEG and self.place_tilt_deg <= MAX_APPROACH_DEG
+
+
+def _screen(
+    model: mujoco.MjModel, data: mujoco.MjData, index: SceneIndex, square: str
+) -> Callable[[npt.NDArray[np.float64]], bool]:
+    """Build the collision screen a tilted anchor over one square is accepted through.
+
+    Screens with the jaws wide open, matching how the reference grasps are solved: the near-closed
+    approach opening wrongly rejects clean poses. The piece on `square` may be touched (it is the
+    one being gripped); nothing else may.
+
+    Args:
+        model: Scene model to test contacts in.
+        data: State the screening poses are written into; mutated.
+        index: Name-to-id lookup for the scene.
+        square: Square whose piece the hand is allowed to touch.
+
+    Returns:
+        A predicate that reports whether an arm configuration comes through the screen clear.
+    """
+    baseline = baseline_self_pairs(model, data, index, np.random.default_rng(0))
+    wide_open = index.gripper_joint_range[1]
+
+    def accept(qpos: npt.NDArray[np.float64]) -> bool:
+        """Report whether a candidate pose touches nothing it should not."""
+        return contacts_at_pose(
+            model,
+            data,
+            index,
+            qpos,
+            grasped_square=square,
+            baseline=baseline,
+            gripper_qpos=wide_open,
+        ).is_clear()
+
+    return accept
+
+
+def _min_tilt_anchor(
+    solver: VerticalGraspSolver,
+    accept: Callable[[npt.NDArray[np.float64]], bool],
+    point: tuple[float, float, float],
+    square: str,
+    rng: np.random.Generator,
+    max_tilt_deg: float,
+    tilt_target_deg: float | None = None,
+    prefer: ArmQpos | None = None,
+) -> tuple[ArmQpos, npt.NDArray[np.float64], float, float]:
+    """Solve a screened tilted anchor at a world point and read its approach axis.
+
+    Args:
+        solver: IK to search with.
+        accept: Collision screen the pose must come through.
+        point: World TCP target, metres.
+        square: Square named in the infeasibility message.
+        rng: Source of the restart seeds.
+        max_tilt_deg: Largest lean off vertical the pose may hold.
+        tilt_target_deg: Lean to aim for; the minimum tilt is taken when omitted.
+        prefer: Configuration the arm reaches this anchor from. Passed through so the anchor
+            keeps the wrist in the same roll branch and the joint-space legs do not spin it.
+
+    Returns:
+        The configuration, its world-frame approach axis (unit), its tilt off vertical in degrees,
+        and its TCP error in metres.
+
+    Raises:
+        PlanInfeasible: If no pose reaches the point within tolerance, under the tilt cap, and
+            through the screen.
+    """
+    qpos, error, tilt, ok = solver.solve_min_tilt(
+        np.asarray(point, dtype=np.float64),
+        rng,
+        accept=accept,
+        max_approach_deg=max_tilt_deg,
+        tilt_target_deg=tilt_target_deg,
+        prefer=prefer,
+    )
+    if not ok:
+        raise PlanInfeasible(
+            f"no clean tilted pose <= {max_tilt_deg:.0f} deg over {square}: closest attempt is "
+            f"{error * 1000:.1f} mm off at {tilt:.1f} deg"
+        )
+    solver.forward(np.asarray(qpos, dtype=np.float64))
+    axis = np.array(solver.approach_axis(), dtype=np.float64)
+    axis /= float(np.linalg.norm(axis))
+    return (
+        (qpos[0], qpos[1], qpos[2], qpos[3], qpos[4]),
+        axis,
+        tilt,
+        error,
+    )
+
+
+def plan_tilted_move(
+    spec: MoveSpec,
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    index: SceneIndex,
+    solver: VerticalGraspSolver,
+    rng: np.random.Generator,
+    *,
+    grasp_tilt_target_deg: float | None = None,
+    place_offset_xy: tuple[float, float] = (0.0, 0.0),
+    max_tilt_deg: float = MAX_TILT_DEG,
+    hover_along_axis: float = HOVER_ALONG_AXIS,
+    release_gap: float = RELEASE_GAP,
+) -> tuple[Plan, PlanQuality]:
+    """Lay out a tilted pick-and-place as a best-effort candidate, not a gated plan.
+
+    Unlike `plan_move`, which forces a fingers-down pose over every anchor and raises when one
+    does not exist, this takes whatever lean each square needs up to `max_tilt_deg` and flies the
+    manipulation legs Cartesian with a per-leg approach axis, so the executor holds the lean rather
+    than pulling back to vertical. The place aims the piece's foot at its square (offset by
+    `place_offset_xy`) and sets it down just above the surface, so a leaned piece still settles on
+    target. The result is meant to be executed and judged by physics, not trusted because it planned
+    — a run that grazes the IK gate but places the piece is a keep.
+
+    Args:
+        spec: The move to plan, with the duration of each of its legs.
+        model: Scene model to solve in.
+        data: State the solving and screening poses are written into; mutated.
+        index: Name-to-id lookup for the scene, supplying the board, its pose and the pieces.
+        solver: IK to search with.
+        rng: Source of the restart seeds.
+        grasp_tilt_target_deg: Lean to aim the grasp at, degrees; the per-square minimum is taken
+            when omitted. A sampler passes a value above the minimum to diversify grasp angles.
+        place_offset_xy: Offset of the piece's foot from the destination square's centre, metres in
+            the board plane, for sampling where inside the square it is set down.
+        max_tilt_deg: Largest lean off vertical any anchor may hold.
+        hover_along_axis: How far the hovers back off along the approach axis.
+        release_gap: How far above the surface the foot is aimed at release.
+
+    Returns:
+        The plan and a `PlanQuality` recording the lean and residual of each anchor.
+
+    Raises:
+        PlanInfeasible: If the grasp or place square has no screened pose under the tilt cap at all
+            — the move cannot be attempted, as opposed to attempted and rejected by physics.
+    """
+    board, board_pose = index.board, index.board_pose
+    radius = grip_radius(spec.piece_type, spec.grasp_height)
+    grip = grip_command(radius, index.gripper_joint_range)
+    ready = ready_command(radius, spec.standoff, index.gripper_joint_range)
+
+    grasp_xyz = _above(board, spec.source, board_pose, spec.grasp_height)
+    grasp_qpos, src_axis, grasp_tilt, grasp_err = _min_tilt_anchor(
+        solver,
+        _screen(model, data, index, spec.source),
+        grasp_xyz,
+        spec.source,
+        rng,
+        max_tilt_deg,
+        grasp_tilt_target_deg,
+        prefer=spec.survey_qpos,
+    )
+    hover_src_xyz = _stand_off(grasp_xyz, src_axis, hover_along_axis)
+
+    # Find the natural lean over the target, aim the foot (not the TCP) at the square, then re-solve
+    # the place at that foot-compensated point: solving over the centre and commanding the shifted
+    # point leaves the anchor tens of millimetres off and diverges the descent.
+    target_screen = _screen(model, data, index, spec.target)
+    _, place_axis0, _, _ = _min_tilt_anchor(
+        solver,
+        target_screen,
+        _above(board, spec.target, board_pose, spec.grasp_height),
+        spec.target,
+        rng,
+        max_tilt_deg,
+    )
+    target_centre = board.square_to_world(spec.target, board_pose)
+    foot_target = np.array(
+        [
+            float(target_centre[0]) + place_offset_xy[0],
+            float(target_centre[1]) + place_offset_xy[1],
+            board.surface_height + release_gap,
+        ]
+    )
+    place_xyz_arr = foot_target - spec.grasp_height * place_axis0
+    place_xyz = (float(place_xyz_arr[0]), float(place_xyz_arr[1]), float(place_xyz_arr[2]))
+    place_qpos, tgt_axis, place_tilt, place_err = _min_tilt_anchor(
+        solver,
+        target_screen,
+        place_xyz,
+        spec.target,
+        rng,
+        max_tilt_deg,
+        prefer=grasp_qpos,
+    )
+    hover_tgt_xyz = _stand_off(place_xyz, tgt_axis, hover_along_axis)
+
+    # Hover anchors as joint poses refined from the grasp/place pose along the axis, so they stay in
+    # the same IK branch: APPROACH and SURVEY_END are flown joint-space (the survey pose is not
+    # fingers-down, so a Cartesian track from it diverges) into these.
+    hover_src_qpos, _, _ = solver.track(
+        np.asarray(hover_src_xyz, dtype=np.float64), np.asarray(grasp_qpos), weight=0.0
+    )
+    hover_tgt_qpos, _, _ = solver.track(
+        np.asarray(hover_tgt_xyz, dtype=np.float64), np.asarray(place_qpos), weight=0.0
+    )
+    hover_src_tuple: ArmQpos = tuple(float(v) for v in hover_src_qpos)  # type: ignore[assignment]
+    hover_tgt_tuple: ArmQpos = tuple(float(v) for v in hover_tgt_qpos)  # type: ignore[assignment]
+
+    src_stand = _stand_off(grasp_xyz, closing_axis(model, data, index, grasp_qpos), spec.standoff)
+    tgt_stand = _stand_off(place_xyz, closing_axis(model, data, index, place_qpos), spec.standoff)
+
+    src = (float(src_axis[0]), float(src_axis[1]), float(src_axis[2]))
+    tgt = (float(tgt_axis[0]), float(tgt_axis[1]), float(tgt_axis[2]))
+    waypoints = (
+        Waypoint(Phase.SURVEY_START, spec.survey_dwell, ready, qpos=spec.survey_qpos),
+        Waypoint(Phase.APPROACH, spec.approach_duration, ready, qpos=hover_src_tuple),
+        Waypoint(
+            Phase.DESCEND, spec.descend_duration, ready, position=src_stand, approach_axis=src
+        ),
+        Waypoint(Phase.GRASP, spec.grasp_duration, grip, position=grasp_xyz, approach_axis=src),
+        Waypoint(Phase.LIFT, spec.lift_duration, grip, position=hover_src_xyz, approach_axis=src),
+        Waypoint(
+            Phase.TRANSPORT,
+            spec.transport_duration,
+            grip,
+            position=hover_tgt_xyz,
+            approach_axis=tgt,
+        ),
+        Waypoint(Phase.PLACE, spec.place_duration, grip, position=place_xyz, approach_axis=tgt),
+        Waypoint(
+            Phase.RELEASE, spec.release_duration, ready, position=tgt_stand, approach_axis=tgt
+        ),
+        Waypoint(
+            Phase.RETREAT, spec.retreat_duration, ready, position=hover_tgt_xyz, approach_axis=tgt
+        ),
+        Waypoint(Phase.SURVEY_END, spec.return_duration, ready, qpos=spec.survey_qpos),
+    )
+    plan = Plan(
+        spec=spec,
+        waypoints=waypoints,
+        hover_source_qpos=hover_src_tuple,
+        hover_target_qpos=hover_tgt_tuple,
+        instruction=spec.instruction(),
+    )
+    quality = PlanQuality(
+        grasp_tilt_deg=grasp_tilt,
+        place_tilt_deg=place_tilt,
+        grasp_residual=grasp_err,
+        place_residual=place_err,
+    )
+    return plan, quality
 
 
 def total_duration(waypoints: tuple[Waypoint, ...]) -> float:

@@ -8,3 +8,23 @@ __pycache__/
 .coverage
 .coverage.*
 htmlcov/
+
+# secrets
+runpod/.env
+
+# training + data artifacts (datasets live on HF, e.g. hugginggeorge/chess-pawns-v1)
+chess-pawns-v1/
+chess-pawns-v1-singletask/
+chess-single-pawn-v1/
+*-captures/
+outputs/
+*.log
+
+# rollout / render artifacts (regenerated on demand, not source)
+runpod/artifacts/
+
+# scratch probes and one-off experiments, kept locally but out of the package
+scratch_*.py
+
+# local MLflow tracking store (SQLite DB + artifacts) — experiment records, not source
+mlflow/

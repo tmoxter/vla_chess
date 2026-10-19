@@ -238,6 +238,16 @@ def test_the_instruction_names_both_squares() -> None:
     assert stub_plan().instruction == "move the pawn from d7 to d6"
 
 
+def test_an_override_replaces_the_coordinate_label() -> None:
+    spec = MoveSpec(
+        source="d7",
+        target="d6",
+        piece_type=PieceType.PAWN,
+        instruction_override="move the pawn one field forward",
+    )
+    assert spec.instruction() == "move the pawn one field forward"
+
+
 def test_total_duration_adds_the_legs_up() -> None:
     plan = stub_plan()
     assert total_duration(plan.waypoints) == pytest.approx(sum(w.duration for w in plan.waypoints))
