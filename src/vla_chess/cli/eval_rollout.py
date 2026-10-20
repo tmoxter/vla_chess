@@ -49,11 +49,19 @@ from vla_chess.sim.scene import (
     make_data,
 )
 
-# Control runs at 50 Hz with 10 sim substeps; the dataset was captured at 10 fps, so one policy
-# step advances the sim by one frame interval = (50/10) control steps x 10 substeps.
-CONTROL_STEPS_PER_FRAME = 5
+# Control runs at 50 Hz with 10 sim substeps, so the sim advances 500 substeps per wall-second.
+# One policy step advances the sim by one dataset frame interval = 500 / fps substeps. The dataset
+# fps is a knob (Exp-1 overfit was 10 fps; the Exp-2 funnel is 30 fps), so the per-frame substep
+# count is derived from fps rather than hard-coded — feeding a 30 fps policy the 10 fps cadence
+# would step the sim 3x too far per action and make the arm overshoot every target.
+CONTROL_HZ = 50.0
 SUBSTEPS_PER_CONTROL = 10
-SUBSTEPS_PER_FRAME = CONTROL_STEPS_PER_FRAME * SUBSTEPS_PER_CONTROL
+SUBSTEPS_PER_SECOND = int(CONTROL_HZ * SUBSTEPS_PER_CONTROL)  # 500
+
+
+def substeps_per_frame(fps: float) -> int:
+    """Sim substeps to advance per policy step so one action spans one dataset frame at `fps`."""
+    return max(1, round(SUBSTEPS_PER_SECOND / fps))
 
 
 def _log(msg: str) -> None:
@@ -137,6 +145,7 @@ def drive(
     post: Any,
     spec: MoveSpec,
     max_frames: int,
+    frame_substeps: int = SUBSTEPS_PER_SECOND // 10,
 ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, PlacementCheck]:
     """Let an already-loaded policy drive the arm for one move, and score where the piece ends.
 
@@ -183,7 +192,7 @@ def drive(
         states.append(state.astype(np.float32))
         actions.append(action_np)
         executor._write_ctrl(data, action_np[:5], float(action_np[5]))
-        for _ in range(SUBSTEPS_PER_FRAME):
+        for _ in range(frame_substeps):
             mujoco.mj_step(model, data)
         if step % 10 == 0:
             _log(f"  step {step}/{max_frames}  state={np.round(state, 3)}")
@@ -204,11 +213,14 @@ def rollout(
     device: str,
     source: str | None = None,
     target: str | None = None,
+    frame_substeps: int = SUBSTEPS_PER_SECOND // 10,
 ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray, PlacementCheck]:
     """Load the policy and drive one move, scoring it. See `drive` for the per-step loop."""
     _log("loading policy (first inference is slow on CPU)...")
     policy, pre, post = _load_policy(repo_id, revision, device)
-    return drive(policy, pre, post, _spec_for(episode, source, target), max_frames)
+    return drive(
+        policy, pre, post, _spec_for(episode, source, target), max_frames, frame_substeps
+    )
 
 
 def analyze_jitter(actions: np.ndarray, states: np.ndarray, chunk: int) -> None:
@@ -308,7 +320,11 @@ def _artifact_path(out: Path, source: str, target: str) -> Path:
 
 
 def _finish_move(
-    frames: list[np.ndarray], states: np.ndarray, actions: np.ndarray, out: Path
+    frames: list[np.ndarray],
+    states: np.ndarray,
+    actions: np.ndarray,
+    out: Path,
+    fps: float = DEFAULT_FPS,
 ) -> None:
     """Persist traces, run the jitter analysis, and encode the mp4 for one driven move.
 
@@ -328,8 +344,8 @@ def _finish_move(
     np.savez_compressed(npz, frames=np.stack(frames), states=states, actions=actions)
     _log(f"saved {len(frames)} frames + traces to {npz}")
     analyze_jitter(actions, states, chunk=50)
-    if write_mp4(frames, out, DEFAULT_FPS):
-        _log(f"wrote {out} ({len(frames)} frames @ {DEFAULT_FPS} fps)")
+    if write_mp4(frames, out, fps):
+        _log(f"wrote {out} ({len(frames)} frames @ {fps} fps)")
     else:
         _log("failed to write mp4")
         sys.exit(1)
@@ -341,6 +357,13 @@ def main() -> None:
     parser.add_argument("--revision", default="008000")
     parser.add_argument("--episode", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=200)
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=DEFAULT_FPS,
+        help=f"dataset fps the policy was trained at; sets sim substeps per action and playback "
+        f"rate (default {DEFAULT_FPS}; the Exp-2 funnel is 30).",
+    )
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--source", default=None, help="held-out start square, e.g. g7")
     parser.add_argument("--target", default=None, help="target square, e.g. g6")
@@ -354,6 +377,9 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=Path("runpod/artifacts/rollout-ep0.mp4"))
     args = parser.parse_args()
 
+    frame_substeps = substeps_per_frame(args.fps)
+    _log(f"fps={args.fps} -> {frame_substeps} sim substeps per policy step")
+
     if args.moves is not None:
         moves = parse_moves(args.moves)
         _log(f"batch of {len(moves)} move(s); loading policy once...")
@@ -361,8 +387,12 @@ def main() -> None:
         checks: list[tuple[tuple[str, str], PlacementCheck]] = []
         for source, target in moves:
             spec = _spec_for(args.episode, source, target)
-            frames, states, actions, check = drive(policy, pre, post, spec, args.max_frames)
-            _finish_move(frames, states, actions, _artifact_path(args.out, source, target))
+            frames, states, actions, check = drive(
+                policy, pre, post, spec, args.max_frames, frame_substeps
+            )
+            _finish_move(
+                frames, states, actions, _artifact_path(args.out, source, target), args.fps
+            )
             checks.append(((source, target), check))
         passed = sum(1 for _, c in checks if c.placed)
         _log(f"=== success rate: {passed}/{len(checks)} ===")
@@ -383,8 +413,9 @@ def main() -> None:
         args.device,
         source=args.source,
         target=args.target,
+        frame_substeps=frame_substeps,
     )
-    _finish_move(frames, states, actions, args.out)
+    _finish_move(frames, states, actions, args.out, args.fps)
     if not check.placed:
         _log(f"rollout did not place the piece on target (ended {check.final_square})")
         sys.exit(1)

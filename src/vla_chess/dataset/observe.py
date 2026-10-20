@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import ceil
 from typing import Final, Protocol
 
 import mujoco
@@ -15,9 +16,13 @@ from vla_chess.sensor.render import RgbFrame
 
 DEFAULT_FPS: Final = 10.0
 
-# Sized to keep a full episode of 512-square RGB frames well inside this host's memory ceiling
-# (docs/render-budget.md); exceeding it raises rather than growing until the process dies.
-MAX_BUFFERED_FRAMES: Final = 400
+# The buffer is capped so a runaway episode raises rather than growing until the process dies. The
+# ceiling is a *duration*, not a frame count: the historical 400-frame cap was 40 s at the 10 fps
+# baseline (docs/render-budget.md, measured on a 4 GB host). Capping by frame count alone silently
+# clips a faster capture to a fraction of an episode — a 30 fps run tops out at ~13 s and raises
+# mid-episode — so the default scales with fps to hold the same 40 s ceiling (1200 frames @ 30 fps).
+MAX_BUFFERED_SECONDS: Final = 40.0
+MAX_BUFFERED_FRAMES: Final = 400  # == MAX_BUFFERED_SECONDS * DEFAULT_FPS; kept for callers/tests
 
 
 class FrameSource(Protocol):
@@ -61,7 +66,7 @@ class ObservationRecorder:
         renderer: FrameSource,
         fps: float = DEFAULT_FPS,
         control_hz: float = 50.0,
-        max_buffered_frames: int = MAX_BUFFERED_FRAMES,
+        max_buffered_frames: int | None = None,
     ) -> None:
         """Set the frame clock this recorder captures on.
 
@@ -71,7 +76,8 @@ class ObservationRecorder:
             control_hz: Rate the control loop calls the hook at, used to turn a step index
                 into a time.
             max_buffered_frames: How many frames may be held in memory before capture refuses
-                to grow further.
+                to grow further. Defaults to a 40 s ceiling scaled to `fps` (so 30 fps allows
+                1200 frames, not the 10 fps baseline of 400), never below the 400-frame baseline.
 
         Raises:
             ValueError: If either rate is not positive, or the capture rate exceeds the
@@ -86,6 +92,9 @@ class ObservationRecorder:
         self._renderer = renderer
         self._fps = fps
         self._control_hz = control_hz
+        if max_buffered_frames is None:
+            # Duration ceiling scaled to the capture rate; never below the 10 fps baseline.
+            max_buffered_frames = max(MAX_BUFFERED_FRAMES, ceil(MAX_BUFFERED_SECONDS * fps))
         self._max_buffered = max_buffered_frames
         self._captured: list[tuple[int, dict[str, RgbFrame]]] = []
         self._next_capture = 0.0

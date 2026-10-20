@@ -28,3 +28,6 @@ scratch_*.py
 
 # local MLflow tracking store (SQLite DB + artifacts) — experiment records, not source
 mlflow/
+
+# ephemeral pod-monitor dedupe state
+runpod/.monitor_state

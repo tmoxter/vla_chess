@@ -20,8 +20,15 @@ JOB_NAME="${JOB_NAME:-smolvla_chess_overfit}"
 RESUME="${RESUME:-false}"
 # Where the durable training log lives. Point this at the persistent /workspace volume (exp2.env
 # does) so a pod death does not take the loss history with it; it also survives for the MLflow
-# ingest to replay. Defaults beside the checkpoints.
-METRICS_DIR="${METRICS_DIR:-${OUTPUT_DIR}}"
+# ingest to replay. Defaults to a sibling of the checkpoint dir.
+METRICS_DIR="${METRICS_DIR:-${OUTPUT_DIR}_logs}"
+# lerobot-train's validate() aborts if OUTPUT_DIR already exists and resume is false. The durable
+# log must therefore live OUTSIDE OUTPUT_DIR: if METRICS_DIR is OUTPUT_DIR (or a child of it),
+# creating it pre-creates OUTPUT_DIR and the run fails its own existence check. Redirect to a sibling.
+if [[ "${RESUME}" != "true" && ( "${METRICS_DIR}" == "${OUTPUT_DIR}" || "${METRICS_DIR}" == "${OUTPUT_DIR}/"* ) ]]; then
+  echo "WARN: METRICS_DIR == OUTPUT_DIR would trip lerobot's exists-check; using ${OUTPUT_DIR}_logs instead." >&2
+  METRICS_DIR="${OUTPUT_DIR}_logs"
+fi
 mkdir -p "${METRICS_DIR}"
 
 wandb_args=()
