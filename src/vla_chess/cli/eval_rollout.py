@@ -218,9 +218,7 @@ def rollout(
     """Load the policy and drive one move, scoring it. See `drive` for the per-step loop."""
     _log("loading policy (first inference is slow on CPU)...")
     policy, pre, post = _load_policy(repo_id, revision, device)
-    return drive(
-        policy, pre, post, _spec_for(episode, source, target), max_frames, frame_substeps
-    )
+    return drive(policy, pre, post, _spec_for(episode, source, target), max_frames, frame_substeps)
 
 
 def analyze_jitter(actions: np.ndarray, states: np.ndarray, chunk: int) -> None:

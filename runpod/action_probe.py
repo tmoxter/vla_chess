@@ -49,8 +49,11 @@ def main() -> None:
     pieces = single_pawn_position(args.source)
     ep = EpisodeRunner(fps=args.fps, pieces=pieces).run(spec, seed=0)
     frames = ep.frames
-    print(f"[probe] {args.source}->{args.target} rev={args.revision}: oracle {len(frames)} frames, "
-          f"succeeded={ep.succeeded}", flush=True)
+    print(
+        f"[probe] {args.source}->{args.target} rev={args.revision}: oracle {len(frames)} frames, "
+        f"succeeded={ep.succeeded}",
+        flush=True,
+    )
 
     policy, pre, post = _load_policy(args.repo_id, args.revision, args.device)
     instr = SINGLE_PAWN_INSTRUCTION
@@ -80,13 +83,22 @@ def main() -> None:
         "place": arm[2 * n // 3 :],
     }
     print(f"\n=== OPEN-LOOP ACTION ERROR ({n} probed states, stride {args.stride}) ===", flush=True)
-    print(f"arm-joint L2 (rad):  mean={arm.mean():.3f}  median={np.median(arm):.3f}  "
-          f"p95={np.percentile(arm,95):.3f}  max={arm.max():.3f}", flush=True)
+    print(
+        f"arm-joint L2 (rad):  mean={arm.mean():.3f}  median={np.median(arm):.3f}  "
+        f"p95={np.percentile(arm, 95):.3f}  max={arm.max():.3f}",
+        flush=True,
+    )
     print(f"gripper abs err:     mean={grip.mean():.3f}  max={grip.max():.3f}", flush=True)
-    print("by phase (mean arm L2, rad): " +
-          "  ".join(f"{k}={v.mean():.3f}" for k, v in thirds.items()), flush=True)
-    print("per-joint mean abs err (rad): " +
-          "  ".join(f"j{j}={pj[:,j].mean():.3f}" for j in range(5)), flush=True)
+    print(
+        "by phase (mean arm L2, rad): "
+        + "  ".join(f"{k}={v.mean():.3f}" for k, v in thirds.items()),
+        flush=True,
+    )
+    print(
+        "per-joint mean abs err (rad): "
+        + "  ".join(f"j{j}={pj[:, j].mean():.3f}" for j in range(5)),
+        flush=True,
+    )
     worst = int(np.argmax(arm))
     print(f"worst state: frame {idxs[worst]} arm-L2={arm[worst]:.3f}", flush=True)
 
