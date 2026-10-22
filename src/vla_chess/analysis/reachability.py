@@ -18,7 +18,14 @@ import mujoco
 import numpy as np
 import numpy.typing as npt
 
-from vla_chess.sim.scene import ARM_JOINT_NAMES, PIECE_FOOT_RADIUS, Board, BoardPose, SceneIndex
+from vla_chess.sim.scene import (
+    ARM_JOINT_NAMES,
+    DEFAULT_BOARD_POSE,
+    PIECE_FOOT_RADIUS,
+    Board,
+    BoardPose,
+    SceneIndex,
+)
 
 DEFAULT_N_SAMPLES: Final = 60_000
 DEFAULT_XY_TOLERANCE: Final = 0.02
@@ -135,6 +142,61 @@ def min_square_clearance(board: Board, board_pose: BoardPose) -> float:
     """
     squares_xy = np.array([board.square_to_world(sq, board_pose)[:2] for sq in board.squares()])
     return float(np.linalg.norm(squares_xy, axis=1).min())
+
+
+def sample_board_pose(
+    rng: np.random.Generator,
+    *,
+    nominal: BoardPose = DEFAULT_BOARD_POSE,
+    xy_jitter: float = STEP4_XY_JITTER,
+    yaw_jitter_deg: float = STEP4_YAW_JITTER_DEG,
+    board: Board | None = None,
+    max_tries: int = 100,
+) -> BoardPose:
+    """Draw one board pose from the Step 4 randomization envelope around a nominal pose.
+
+    The envelope is Step 4's reject-and-resample sampler (implementation-plan-step-1.md §4): a
+    draw whose nearest square falls inside the arm base's clearance floor is thrown away and
+    redrawn, so every returned pose clears the base. Reachability of a specific move is not
+    gated here — it is validated downstream by the funnel's own physics, which is Step 5's role.
+    Square pitch is held at the nominal; only xy and yaw are jittered.
+
+    Args:
+        rng: Source of the sampled offsets.
+        nominal: Pose the jitter is applied around; the board placement grasp heights were
+            tuned against.
+        xy_jitter: Largest board-centre offset drawn on each planar axis, metres. Zero returns
+            the nominal centre.
+        yaw_jitter_deg: Largest board-yaw offset drawn, degrees. Zero returns the nominal yaw.
+        board: Board geometry the clearance is measured against; a default board is built when
+            omitted.
+        max_tries: How many draws to attempt before giving up on finding a clearing pose.
+
+    Returns:
+        A board pose within the envelope whose nearest square clears the arm base.
+
+    Raises:
+        ValueError: If a jitter is negative.
+        RuntimeError: If no draw cleared the base within `max_tries`.
+    """
+    if xy_jitter < 0.0:
+        raise ValueError(f"xy_jitter must be non-negative, got {xy_jitter}")
+    if yaw_jitter_deg < 0.0:
+        raise ValueError(f"yaw_jitter_deg must be non-negative, got {yaw_jitter_deg}")
+    board = board if board is not None else Board()
+    for _ in range(max_tries):
+        pose = BoardPose(
+            x=nominal.x + float(rng.uniform(-xy_jitter, xy_jitter)),
+            y=nominal.y + float(rng.uniform(-xy_jitter, xy_jitter)),
+            yaw=nominal.yaw + float(np.radians(rng.uniform(-yaw_jitter_deg, yaw_jitter_deg))),
+            square_pitch=nominal.square_pitch,
+        )
+        if min_square_clearance(board, pose) >= MIN_SQUARE_CLEARANCE:
+            return pose
+    raise RuntimeError(
+        f"no board pose cleared the base in {max_tries} tries at xy_jitter={xy_jitter}, "
+        f"yaw_jitter_deg={yaw_jitter_deg}"
+    )
 
 
 @dataclass(frozen=True)

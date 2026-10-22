@@ -20,11 +20,14 @@ convergence problem there is treated as a reason to re-tune Step 3/4 reachabilit
 to swap solvers.
 
 **Do not read the verdict below as a grasp count.** It is the loosest possible reading of
-"reachable": any orientation, no collision check, no piece on the square. Under the fingers-down
-constraint an actual grasp needs, with the starting position on the board and the arm required
-to clear itself, 30 of these 64 squares have a usable pose — see `docs/grasp-poses.md`, which is
-the authority on what can be picked up. The gap between the two numbers is not a contradiction;
-it is what this probe deliberately does not model.
+"reachable": any orientation, no collision check, no piece on the square. The graspable set is
+much smaller and is **not** settled by this probe.
+
+> **Grasp strategy updated (2026-09-05):** the old fingers-down count (~28–30 squares) is
+> superseded. Strictly vertical grasping is too strict (~4 usable moves). The direction is a
+> tilted grasp (wrist ≤ ~45° off vertical), which lifts the kinematic ceiling to ~37 fields
+> (ranks 4-centre through 8). See `experiment-2-plan.md` → "Grasp feasibility: vertical is too
+> strict". Do not treat vertical fingers-down as the grasp requirement or as solved.
 
 **Both of those are still sim-only confirmations.** Every number this probe reports —
 table height, board offset from the arm base, square pitch — is a value chosen in

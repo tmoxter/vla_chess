@@ -5,13 +5,14 @@ from __future__ import annotations
 import subprocess
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Final
+from typing import Final, TypeVar
 
 import numpy as np
 
 from vla_chess.control.executor import CONTROL_HZ, TILTED_IK_ABORT, ExecutionResult, Executor
-from vla_chess.control.planner import ArmQpos, MoveSpec, PlanInfeasible, plan_move
+from vla_chess.control.planner import ArmQpos, MoveSpec, Plan, PlanInfeasible, plan_move
 from vla_chess.control.sampling import SampleKnobs, plan_candidate, sample_candidates
 from vla_chess.dataset.observe import DEFAULT_FPS, Frame, ObservationRecorder
 from vla_chess.dataset.validate import Validation, infeasible, validate
@@ -34,6 +35,47 @@ from vla_chess.sim.scene import (
 )
 
 ENGINE_VERSION_UNKNOWN: Final = "unknown"
+
+_T = TypeVar("_T")
+
+
+class CandidateSelection(Enum):
+    """Which accepted funnel candidate a slot keeps.
+
+    `FIRST` stops at the first candidate that places the piece — the baseline when it succeeds —
+    so a slot is cheap and its kept episode is near-identical across seeds. `RANDOM` evaluates
+    every candidate and keeps one of the accepted at random, so the kept episode carries the
+    sampled grasp lean and placement offset instead of the clean baseline, which is what turns
+    extra seeds into real trajectory diversity rather than duplicates.
+    """
+
+    FIRST = "first"
+    RANDOM = "random"
+
+
+def select_kept(
+    accepted: Sequence[_T], selection: CandidateSelection, rng: np.random.Generator
+) -> _T:
+    """Pick which of a slot's accepted candidates to keep.
+
+    Args:
+        accepted: The candidates that placed the piece, in the order they were attempted; must
+            be non-empty.
+        selection: Keep the first, or one drawn uniformly at random.
+        rng: Source of the random draw, used only for `RANDOM`.
+
+    Returns:
+        The chosen element.
+
+    Raises:
+        ValueError: If `accepted` is empty.
+    """
+    if not accepted:
+        raise ValueError("cannot select a kept candidate from an empty set")
+    if selection is CandidateSelection.FIRST:
+        return accepted[0]
+    return accepted[int(rng.integers(len(accepted)))]
+
 
 # The one view the policy is trained on. The witness view the single-episode CLI also renders is
 # for humans looking at a run, not for the dataset, so the runner does not carry it by default.
@@ -205,24 +247,36 @@ class EpisodeRunner:
         )
 
     def run_funnel(
-        self, move: MoveSpec, knobs: SampleKnobs, *, base_seed: int = 0
+        self,
+        move: MoveSpec,
+        knobs: SampleKnobs,
+        *,
+        base_seed: int = 0,
+        selection: CandidateSelection = CandidateSelection.FIRST,
     ) -> FunnelOutcome:
-        """Sample candidates for one move, execute each, and record the first that places the piece.
+        """Sample candidates for one move, execute each, and record an accepted one.
 
         The funnel that replaces the a-priori gate: candidates are drawn from a spread of grasp
         leans and placement offsets, executed under the relaxed tilted IK abort, and judged by
-        physics. Each attempt is run once without rendering to find a keeper; only the accepted
-        candidate is re-run with the cameras attached, so rendering — the expensive half — is paid
-        only for an episode that is kept.
+        physics. Each attempt is run once without rendering; only the kept candidate is re-run
+        with the cameras attached, so rendering — the expensive half — is paid once per slot.
+
+        Under `FIRST` the search stops at the first candidate that places the piece — the clean
+        baseline whenever it succeeds — so an easy move is cheap and reproducible. Under `RANDOM`
+        every candidate is executed and the kept one is drawn from those that placed the piece, so
+        the kept episode carries a sampled lean and placement offset rather than the baseline;
+        this is what makes extra seeds diversify the data instead of duplicating it.
 
         Args:
             move: The move to demonstrate, on the runner's board layout.
             knobs: The distribution the candidates are drawn from.
-            base_seed: Seed of the move's first candidate; each attempt offsets from it.
+            base_seed: Seed of the move's first candidate; each attempt offsets from it, and the
+                random keep draw is taken from it too, so a slot is reproducible from its seed.
+            selection: Whether to keep the first accepted candidate or one drawn at random.
 
         Returns:
             The outcome: the recorded episode when a candidate placed the piece (None otherwise),
-            and the verdict on every attempt up to and including the keeper, for the yield log.
+            and the verdict on every attempt executed, for the yield log.
 
         Raises:
             ValueError: If the source square does not carry the move's piece.
@@ -235,6 +289,7 @@ class EpisodeRunner:
         executor = Executor(model, index, control_hz=self._control_hz)
 
         attempts: list[Validation] = []
+        accepted: list[Plan] = []
         for candidate in candidates:
             plan_data = make_data(model, index)
             solver = VerticalGraspSolver(model, plan_data, index)
@@ -250,23 +305,30 @@ class EpisodeRunner:
             attempts.append(verdict)
             if not verdict.accepted:
                 continue
-            data = make_data(model, index)
-            with Renderer(model, self._cameras) as renderer:
-                recorder = ObservationRecorder(renderer, fps=self._fps, control_hz=self._control_hz)
-                result = executor.run(
-                    data, plan, on_control_step=recorder.on_control_step, ik_abort=TILTED_IK_ABORT
-                )
-                frames = recorder.frames(result)
-            episode = Episode(
-                spec=move,
-                instruction=plan.instruction,
-                frames=frames,
-                execution=result,
-                engine_version=self._engine_version,
-                fps=self._fps,
+            accepted.append(plan)
+            if selection is CandidateSelection.FIRST:
+                break
+
+        if not accepted:
+            return FunnelOutcome(episode=None, attempts=tuple(attempts))
+
+        kept = select_kept(accepted, selection, np.random.default_rng(base_seed))
+        data = make_data(model, index)
+        with Renderer(model, self._cameras) as renderer:
+            recorder = ObservationRecorder(renderer, fps=self._fps, control_hz=self._control_hz)
+            result = executor.run(
+                data, kept, on_control_step=recorder.on_control_step, ik_abort=TILTED_IK_ABORT
             )
-            return FunnelOutcome(episode=episode, attempts=tuple(attempts))
-        return FunnelOutcome(episode=None, attempts=tuple(attempts))
+            frames = recorder.frames(result)
+        episode = Episode(
+            spec=move,
+            instruction=kept.instruction,
+            frames=frames,
+            execution=result,
+            engine_version=self._engine_version,
+            fps=self._fps,
+        )
+        return FunnelOutcome(episode=episode, attempts=tuple(attempts))
 
     def run_all(self, specs: Sequence[MoveSpec], *, base_seed: int = 0) -> Iterator[Episode]:
         """Run a list of moves, one episode each, in order.

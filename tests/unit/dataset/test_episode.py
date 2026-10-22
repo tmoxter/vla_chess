@@ -9,10 +9,12 @@ from vla_chess.control.planner import MoveSpec, Phase
 from vla_chess.dataset import episode as episode_module
 from vla_chess.dataset.episode import (
     ENGINE_VERSION_UNKNOWN,
+    CandidateSelection,
     Episode,
     EpisodeRunner,
     git_engine_version,
     move_scene_description,
+    select_kept,
 )
 from vla_chess.grasp.solver import GRASP_HEIGHT
 from vla_chess.sim.positions import starting_position
@@ -90,6 +92,36 @@ def test_run_all_yields_one_episode_per_move_with_offset_seeds() -> None:
 
     assert [ep.spec for ep in episodes] == specs
     assert seen == [(specs[0], 10), (specs[1], 11), (specs[2], 12)]
+
+
+def test_select_kept_first_takes_the_baseline() -> None:
+    accepted = ["baseline", "jittered-1", "jittered-2"]
+    kept = select_kept(accepted, CandidateSelection.FIRST, np.random.default_rng(0))
+    assert kept == "baseline"
+
+
+def test_select_kept_random_is_reproducible_from_its_seed() -> None:
+    accepted = ["baseline", "jittered-1", "jittered-2"]
+    first = select_kept(accepted, CandidateSelection.RANDOM, np.random.default_rng(7))
+    second = select_kept(accepted, CandidateSelection.RANDOM, np.random.default_rng(7))
+    assert first == second
+    assert first in accepted
+
+
+def test_select_kept_random_reaches_past_the_baseline() -> None:
+    accepted = ["baseline", "jittered-1", "jittered-2"]
+    drawn = {
+        select_kept(accepted, CandidateSelection.RANDOM, np.random.default_rng(seed))
+        for seed in range(50)
+    }
+    # The whole point of random selection is that a non-baseline candidate can be kept.
+    assert drawn - {"baseline"}
+    assert drawn <= set(accepted)
+
+
+def test_select_kept_rejects_an_empty_set() -> None:
+    with pytest.raises(ValueError, match="empty"):
+        select_kept([], CandidateSelection.RANDOM, np.random.default_rng(0))
 
 
 def test_engine_version_reports_the_short_sha(monkeypatch: pytest.MonkeyPatch) -> None:

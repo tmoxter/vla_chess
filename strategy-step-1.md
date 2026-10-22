@@ -80,6 +80,12 @@ fingers close on the piece, and the reference set is re-solved against the corre
 this section used to carry: `DEFAULT_BOARD_X` is at 0.300 because the black queen and king are
 liftable there, and at the corrected frame they still are.
 
+> **Note (2026-09-05):** the "28 of 64 squares" here is the *vertical fingers-down* reference-grasp
+> count, now SUPERSEDED as the grasp strategy — vertical is too strict (~4 usable moves). The
+> board-X = 0.300 placement conclusion still stands; the *graspable-field* count does not. Tilted
+> grasp (≤~45°) targets ~37 fields. See `experiment-2-plan.md` → "Grasp feasibility: vertical is
+> too strict".
+
 One consequence is open, and it is a placement decision rather than code:
 
 1. **Transport clearance.** Hover caps near ~70 mm against a 92 mm tallest piece, so no

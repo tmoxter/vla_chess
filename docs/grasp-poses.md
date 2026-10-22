@@ -1,5 +1,14 @@
 # Vertical grasp poses
 
+> **SUPERSEDED as the grasp strategy (2026-09-05).** Strictly vertical (fingers-down) grasping is
+> too strict — it yields only ~4 usable pick-and-place moves and covers 28 static squares with
+> rank 4 entirely absent. It is **no longer the constraint the dataset targets.** The direction is
+> a tilted grasp (wrist allowed off vertical, up to ~45°), which raises the kinematic ceiling to
+> ~37 fields (ranks 4-centre through 8). See `experiment-2-plan.md` → "Grasp feasibility: vertical
+> is too strict". This file still documents the `reference_grasps.json` asset (which exists and is
+> used by some trajectory work), but do **not** cite its fingers-down count as the graspable set
+> or treat vertical reach as solved.
+
 `src/vla_chess/assets/reference_grasps.json` holds one solved arm configuration per reachable
 square: the TCP on the square centre, 2.5 cm above the playing surface, fingers pointing
 straight down, and the arm clear of itself, the board and the other pieces. They exist so

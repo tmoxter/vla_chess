@@ -20,13 +20,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+import numpy as np
+
+from vla_chess.analysis.reachability import (
+    STEP4_XY_JITTER,
+    STEP4_YAW_JITTER_DEG,
+    sample_board_pose,
+)
 from vla_chess.control.planner import MoveSpec, PlanInfeasible
 from vla_chess.control.sampling import DEFAULT_ATTEMPTS, SampleKnobs
 from vla_chess.dataset.capture import load_capture, save_capture
-from vla_chess.dataset.episode import EpisodeRunner, git_engine_version
+from vla_chess.dataset.episode import CandidateSelection, EpisodeRunner, git_engine_version
 from vla_chess.dataset.observe import DEFAULT_FPS
 from vla_chess.sim.positions import single_pawn_position
-from vla_chess.sim.scene import PiecePlacement, PieceType
+from vla_chess.sim.scene import DEFAULT_BOARD_POSE, PiecePlacement, PieceType
 
 if TYPE_CHECKING:
     # writer imports lerobot, which lives only in the datagen env; keep it out of this module's
@@ -156,8 +163,10 @@ def build_move_pool_specs(
     """Lay out a move pool with a distance-specific label, repeated across seeds.
 
     Every move is generated `seeds` times; the per-episode seed (assigned downstream by the
-    generator) jitters the board pose, so each repeat is a free augmentation of the same push.
-    Episodes are grouped by seed slot so an interrupted, resumed run refills in a stable order.
+    generator) only reseeds the grasp solver's random restarts on a fixed scene, so these repeats
+    are near-identical — the board-pose and random-candidate diversity lives in the `--funnel
+    --diverse` path, not here. Episodes are grouped by seed slot so an interrupted, resumed run
+    refills in a stable order.
 
     Args:
         moves: The (source, target) pawn pushes to demonstrate, each a same-file forward move.
@@ -308,23 +317,33 @@ def generate_funnel(
     master_seed: int,
     fps: float,
     instruction: str | None = None,
+    selection: CandidateSelection = CandidateSelection.FIRST,
+    board_xy_jitter: float = 0.0,
+    board_yaw_jitter_deg: float = 0.0,
 ) -> dict[str, object]:
     """Generate one kept episode per (move, seed slot) through the sample-then-filter funnel.
 
-    Every slot samples up to `knobs.attempts` candidates and keeps the first that places the piece;
-    a slot that keeps none captures nothing and is logged as a miss. Slots whose capture already
-    exists are skipped, so an interrupted run resumes. The per-move yield — attempts spent, episodes
-    kept, and why the rejects failed — is returned and written beside the captures.
+    Every slot samples up to `knobs.attempts` candidates and keeps one that places the piece — the
+    first under `FIRST` selection, one drawn at random under `RANDOM`; a slot that keeps none
+    captures nothing and is logged as a miss. When a board jitter is set, each slot also draws its
+    own board pose from the Step 4 envelope, so the kept episodes spread over board placements as
+    well as grasp poses rather than repeating one fixed scene. Slots whose capture already exists
+    are skipped, so an interrupted run resumes. The per-move yield — attempts spent, episodes kept,
+    and why the rejects failed — is returned and written beside the captures.
 
     Args:
         moves: The (source, target) pawn pushes to demonstrate, each a same-file forward move.
-        seeds: How many jittered slots of the whole pool to generate.
+        seeds: How many slots of the whole pool to generate.
         knobs: The candidate distribution each slot draws from.
         captures_root: Directory the per-episode captures are written under.
         master_seed: Base seed; slot i draws candidates from `master_seed + i * knobs.attempts`.
         fps: Capture frame rate.
         instruction: Constant task label to stamp on every kept episode, overriding the
             distance-specific default; the one-/two-field phrasing is kept when omitted.
+        selection: Whether each slot keeps the first accepted candidate or one at random.
+        board_xy_jitter: Largest per-slot board-centre offset per planar axis, metres; zero
+            pins every slot to the nominal board pose.
+        board_yaw_jitter_deg: Largest per-slot board-yaw offset, degrees; zero pins the yaw.
 
     Returns:
         The yield manifest: total slots, kept count, and per-move attempts/kept/reject tallies.
@@ -353,13 +372,25 @@ def generate_funnel(
                     instruction if instruction is not None else forward_instruction(source, target)
                 ),
             )
+            board_pose = (
+                sample_board_pose(
+                    np.random.default_rng([master_seed, index]),
+                    xy_jitter=board_xy_jitter,
+                    yaw_jitter_deg=board_yaw_jitter_deg,
+                )
+                if board_xy_jitter > 0.0 or board_yaw_jitter_deg > 0.0
+                else DEFAULT_BOARD_POSE
+            )
             runner = EpisodeRunner(
-                fps=fps, pieces=single_pawn_position(source), engine_version=engine_version
+                fps=fps,
+                pieces=single_pawn_position(source),
+                board_pose=board_pose,
+                engine_version=engine_version,
             )
             base_seed = master_seed + index * knobs.attempts
             print(f"{head} sampling up to {knobs.attempts} candidates...", flush=True)
             started = time.monotonic()
-            outcome = runner.run_funnel(move, knobs, base_seed=base_seed)
+            outcome = runner.run_funnel(move, knobs, base_seed=base_seed, selection=selection)
 
             stats.slots += 1
             stats.attempts += len(outcome.attempts)
@@ -388,6 +419,9 @@ def generate_funnel(
         "slots": total,
         "kept": kept,
         "attempts_per_slot": knobs.attempts,
+        "selection": selection.value,
+        "board_xy_jitter": board_xy_jitter,
+        "board_yaw_jitter_deg": board_yaw_jitter_deg,
         "reason_totals": dict(reason_totals),
         "per_move": {name: stat.as_dict() for name, stat in per_move.items()},
     }
@@ -521,6 +555,29 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=SampleKnobs.place_offset_radius,
         help="metres the placement foot may be offset within the square in --funnel mode",
     )
+    parser.add_argument(
+        "--diverse",
+        action="store_true",
+        help="diversify the --funnel slices instead of repeating near-identical baselines: each "
+        "slot keeps a random accepted candidate (not just the clean baseline) and draws its own "
+        "board pose from the Step 4 envelope. Turns extra --seeds into real trajectory diversity. "
+        "Board jitter magnitudes default to the full envelope; tune with --board-xy-jitter and "
+        "--board-yaw-jitter.",
+    )
+    parser.add_argument(
+        "--board-xy-jitter",
+        type=float,
+        default=STEP4_XY_JITTER,
+        help=f"with --diverse, largest per-slot board-centre offset per axis in metres "
+        f"(default {STEP4_XY_JITTER}); 0 pins the board centre",
+    )
+    parser.add_argument(
+        "--board-yaw-jitter",
+        type=float,
+        default=STEP4_YAW_JITTER_DEG,
+        help=f"with --diverse, largest per-slot board-yaw offset in degrees "
+        f"(default {STEP4_YAW_JITTER_DEG}); 0 pins the board yaw",
+    )
     parser.add_argument("--master-seed", type=int, default=0)
     parser.add_argument("--repo-id", default=None, help="LeRobot repo id (writer default if unset)")
     parser.add_argument(
@@ -577,6 +634,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         moves = one_step_moves(EXP2_TRAINED_MOVES) if args.one_step_only else EXP2_TRAINED_MOVES
         instruction = SINGLE_PAWN_INSTRUCTION if args.single_task else None
+        selection = CandidateSelection.RANDOM if args.diverse else CandidateSelection.FIRST
         manifest = generate_funnel(
             moves,
             args.seeds,
@@ -585,6 +643,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.master_seed,
             args.fps,
             instruction=instruction,
+            selection=selection,
+            board_xy_jitter=args.board_xy_jitter if args.diverse else 0.0,
+            board_yaw_jitter_deg=args.board_yaw_jitter if args.diverse else 0.0,
         )
         print(
             f"funnel kept {manifest['kept']}/{manifest['slots']} slots; "
