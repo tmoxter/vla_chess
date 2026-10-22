@@ -42,3 +42,8 @@ to be active.
 
 Tests marked `slow` (CPU-expensive) and `render` (needs the osmesa software renderer) are
 opt-in and are not run by `precommit`.
+
+
+https://github.com/user-attachments/assets/2d835029-d066-4127-b617-9af2567fa565
+
+
