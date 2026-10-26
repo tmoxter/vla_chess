@@ -114,6 +114,81 @@ class ExecutionResult:
         return self.abort_reason is None and self.grasped and self.placed
 
 
+# Where DART noise is applied along a pick-and-place, as (gain at leg start, gain at leg end),
+# linearly interpolated across the leg; phases not listed get none. The grasp close and the place
+# need millimetre precision and the time-indexed expert cannot re-grasp, so the noise is only on
+# while the arm is high: it fades out across the approach and across the transport, and the
+# descent onto the pawn, the close, the set-down and the release all run clean. The arm is pushed
+# off the expert's path where the policy drifts and the clean labels have pulled it back before
+# precision matters. Measured over the 20 Exp-1 moves (runpod/dart_probe.py): ungated noise of only
+# ~7 mm mean TCP drift dropped the expert to 4% success; fading across the descent instead still
+# let the fingers knock the pawn (38% at 0.04 rad); this schedule grasps 100% and places 85% at
+# 0.06 rad with up to ~3.4 cm of drift per episode.
+DART_PHASE_GAINS: Final[dict[Phase, tuple[float, float]]] = {
+    Phase.SURVEY_START: (1.0, 1.0),
+    Phase.APPROACH: (1.0, 0.0),
+    Phase.LIFT: (0.0, 1.0),
+    Phase.TRANSPORT: (1.0, 0.0),
+}
+
+
+class ActionNoise:
+    """Temporally correlated joint noise added to the executed command, never to the label (DART).
+
+    An Ornstein-Uhlenbeck process per arm joint: each control step it relaxes toward zero with
+    time constant `tau` and is kicked by Gaussian noise scaled so its stationary standard deviation
+    is `sigma`. Correlated rather than white because the position actuators low-pass a fresh
+    per-step draw into nearly nothing; a drift that persists for a fraction of a second actually
+    moves the arm off the expert's path, which is the point of the injection. The gripper is left
+    clean so the noise perturbs where the jaws go, not whether they close. The process runs every
+    step; `DART_PHASE_GAINS` scales what reaches the actuators by phase.
+    """
+
+    def __init__(
+        self,
+        sigma: float,
+        tau: float,
+        control_hz: float,
+        rng: np.random.Generator,
+        gains: dict[Phase, tuple[float, float]] = DART_PHASE_GAINS,
+    ) -> None:
+        """Set the noise scale and correlation.
+
+        Args:
+            sigma: Stationary standard deviation per arm joint, radians.
+            tau: Correlation time constant, seconds.
+            control_hz: Rate `sample` is called at, which sets the per-step decay.
+            rng: Source of the Gaussian kicks; seeded by the caller so a run is reproducible.
+            gains: Per-phase (start, end) gain on the offset; `DART_PHASE_GAINS` by default.
+
+        Raises:
+            ValueError: If sigma is negative or tau is not positive.
+        """
+        if sigma < 0.0 or tau <= 0.0:
+            raise ValueError(f"need sigma >= 0 and tau > 0, got sigma={sigma}, tau={tau}")
+        self._decay = float(np.exp(-1.0 / (tau * control_hz)))
+        self._kick = sigma * float(np.sqrt(1.0 - self._decay**2))
+        self._rng = rng
+        self._gains = gains
+        self._value = rng.normal(0.0, sigma, size=len(ARM_JOINT_NAMES))
+
+    def sample(self, phase: Phase, progress: float) -> npt.NDArray[np.float64]:
+        """Advance the process one control step and return the gated offset, radians.
+
+        Args:
+            phase: The phase of the leg being flown.
+            progress: How far through that leg this step is, from 0 to 1.
+
+        Returns:
+            The offset to add to the arm command this step.
+        """
+        self._value = self._decay * self._value + self._kick * self._rng.normal(
+            size=len(ARM_JOINT_NAMES)
+        )
+        start, end = self._gains.get(phase, (0.0, 0.0))
+        return (start + progress * (end - start)) * self._value
+
+
 def minimum_jerk(alpha: float) -> float:
     """Ease a leg's progress so it starts and ends at rest.
 
@@ -284,6 +359,7 @@ class Executor:
         on_control_step: Callable[[int, mujoco.MjData], None] | None = None,
         wall_clock_limit: float = WALL_CLOCK_LIMIT,
         ik_abort: float = MAX_IK_ERROR,
+        action_noise: ActionNoise | None = None,
     ) -> ExecutionResult:
         """Execute a plan, recording one state/action pair per control step.
 
@@ -303,6 +379,11 @@ class Executor:
                 the run is aborted as diverged. Defaults to the fingers-down `MAX_IK_ERROR`; a
                 tilted sample-then-filter plan passes `TILTED_IK_ABORT` so a leg that grazes the
                 gate but places the piece is left for the validator to judge.
+            action_noise: DART injection. When set, its offset is added to the arm command that
+                is written to the actuators, while the recorded action stays the clean expert
+                command. The plan's targets are absolute, so the next clean command already
+                points back toward the expert's path from wherever the noise left the arm, and
+                that is what gets recorded against the perturbed state.
 
         Returns:
             The rollout: its states and actions, the phase each step belonged to, whether the
@@ -378,7 +459,12 @@ class Executor:
                     arm = start_arm + blend * (target_arm - start_arm)
                 gripper = start_gripper + (leg / legs) * (waypoint.gripper - start_gripper)
 
-                self._write_ctrl(data, arm, gripper)
+                executed = (
+                    arm
+                    if action_noise is None
+                    else arm + action_noise.sample(waypoint.phase, leg / legs)
+                )
+                self._write_ctrl(data, executed, gripper)
                 for _ in range(self._decimation):
                     mujoco.mj_step(self._model, data)
 

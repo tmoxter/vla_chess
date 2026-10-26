@@ -16,7 +16,7 @@ import sys
 import time
 from collections import Counter
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -30,7 +30,12 @@ from vla_chess.analysis.reachability import (
 from vla_chess.control.planner import MoveSpec, PlanInfeasible
 from vla_chess.control.sampling import DEFAULT_ATTEMPTS, SampleKnobs
 from vla_chess.dataset.capture import load_capture, save_capture
-from vla_chess.dataset.episode import CandidateSelection, EpisodeRunner, git_engine_version
+from vla_chess.dataset.episode import (
+    CandidateSelection,
+    DartKnobs,
+    EpisodeRunner,
+    git_engine_version,
+)
 from vla_chess.dataset.observe import DEFAULT_FPS
 from vla_chess.sim.positions import single_pawn_position
 from vla_chess.sim.scene import DEFAULT_BOARD_POSE, PiecePlacement, PieceType
@@ -320,6 +325,8 @@ def generate_funnel(
     selection: CandidateSelection = CandidateSelection.FIRST,
     board_xy_jitter: float = 0.0,
     board_yaw_jitter_deg: float = 0.0,
+    dart: DartKnobs | None = None,
+    shard: tuple[int, int] = (0, 1),
 ) -> dict[str, object]:
     """Generate one kept episode per (move, seed slot) through the sample-then-filter funnel.
 
@@ -344,6 +351,11 @@ def generate_funnel(
         board_xy_jitter: Largest per-slot board-centre offset per planar axis, metres; zero
             pins every slot to the nominal board pose.
         board_yaw_jitter_deg: Largest per-slot board-yaw offset, degrees; zero pins the yaw.
+        dart: When set, each kept episode is recorded under injected action noise (DART) with
+            clean expert labels; see `EpisodeRunner.run_funnel`.
+        shard: `(i, n)` — generate only the slots whose index is `i` mod `n`, so `n` processes can
+            split one pool. Slot indices, seeds and capture directories are the unsharded ones, so
+            the shards' captures merge into a single dataset; the manifest is written per shard.
 
     Returns:
         The yield manifest: total slots, kept count, and per-move attempts/kept/reject tallies.
@@ -360,6 +372,9 @@ def generate_funnel(
             stats = per_move.setdefault(name, MoveYield())
             head = f"[{index + 1}/{total}] {name} slot {slot}"
             target_dir = capture_dir(captures_root, index)
+            if index % shard[1] != shard[0]:
+                index += 1
+                continue
             if target_dir.exists():
                 print(f"{head} already captured, skipping", flush=True)
                 index += 1
@@ -390,7 +405,9 @@ def generate_funnel(
             base_seed = master_seed + index * knobs.attempts
             print(f"{head} sampling up to {knobs.attempts} candidates...", flush=True)
             started = time.monotonic()
-            outcome = runner.run_funnel(move, knobs, base_seed=base_seed, selection=selection)
+            outcome = runner.run_funnel(
+                move, knobs, base_seed=base_seed, selection=selection, dart=dart
+            )
 
             stats.slots += 1
             stats.attempts += len(outcome.attempts)
@@ -422,10 +439,15 @@ def generate_funnel(
         "selection": selection.value,
         "board_xy_jitter": board_xy_jitter,
         "board_yaw_jitter_deg": board_yaw_jitter_deg,
+        "dart": None if dart is None else asdict(dart),
+        "shard": list(shard),
         "reason_totals": dict(reason_totals),
         "per_move": {name: stat.as_dict() for name, stat in per_move.items()},
     }
-    (captures_root / FUNNEL_MANIFEST_NAME).write_text(json.dumps(manifest, indent=2))
+    name = FUNNEL_MANIFEST_NAME
+    if shard[1] > 1:
+        name = name.replace(".json", f"-shard{shard[0]}of{shard[1]}.json")
+    (captures_root / name).write_text(json.dumps(manifest, indent=2))
     return manifest
 
 
@@ -578,6 +600,31 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=f"with --diverse, largest per-slot board-yaw offset in degrees "
         f"(default {STEP4_YAW_JITTER_DEG}); 0 pins the board yaw",
     )
+    parser.add_argument(
+        "--dart-sigma",
+        type=float,
+        default=0.0,
+        help="with --funnel, record each kept episode under DART action noise of this stationary "
+        "std per arm joint (radians); labels stay the clean expert commands. 0 disables it.",
+    )
+    parser.add_argument(
+        "--dart-tau",
+        type=float,
+        default=DartKnobs.tau,
+        help="DART noise correlation time constant in seconds",
+    )
+    parser.add_argument(
+        "--dart-retries",
+        type=int,
+        default=DartKnobs.retries,
+        help="noise draws tried per slot before it is logged as a miss",
+    )
+    parser.add_argument(
+        "--shard",
+        default="0/1",
+        help="with --funnel, 'i/n': generate only slots with index i mod n (combine with "
+        "--no-serialize, then serialize once all shards are done)",
+    )
     parser.add_argument("--master-seed", type=int, default=0)
     parser.add_argument("--repo-id", default=None, help="LeRobot repo id (writer default if unset)")
     parser.add_argument(
@@ -604,6 +651,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="only generate captures, do not write the dataset",
     )
     return parser.parse_args(argv)
+
+
+def _parse_shard(spec: str) -> tuple[int, int]:
+    """Parse an 'i/n' shard spec, checking 0 <= i < n."""
+    i, _, n = spec.partition("/")
+    shard = (int(i), int(n))
+    if not 0 <= shard[0] < shard[1]:
+        raise ValueError(f"shard {spec!r} must be i/n with 0 <= i < n")
+    return shard
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -646,6 +702,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             selection=selection,
             board_xy_jitter=args.board_xy_jitter if args.diverse else 0.0,
             board_yaw_jitter_deg=args.board_yaw_jitter if args.diverse else 0.0,
+            dart=(
+                DartKnobs(sigma=args.dart_sigma, tau=args.dart_tau, retries=args.dart_retries)
+                if args.dart_sigma > 0.0
+                else None
+            ),
+            shard=_parse_shard(args.shard),
         )
         print(
             f"funnel kept {manifest['kept']}/{manifest['slots']} slots; "

@@ -165,3 +165,4 @@ allowed-confusables = ["×"]
 # The rollout CLI drives a lerobot policy object that is only typed in the eval env; its handles
 # (policy/pre/post) cross into this module as `Any`, which is exactly what ANN401 guards against.
 "src/vla_chess/cli/eval_rollout.py" = ["ANN401"]
+"src/vla_chess/cli/eval_metrics.py" = ["ANN401"]

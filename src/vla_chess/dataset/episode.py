@@ -11,7 +11,13 @@ from typing import Final, TypeVar
 
 import numpy as np
 
-from vla_chess.control.executor import CONTROL_HZ, TILTED_IK_ABORT, ExecutionResult, Executor
+from vla_chess.control.executor import (
+    CONTROL_HZ,
+    TILTED_IK_ABORT,
+    ActionNoise,
+    ExecutionResult,
+    Executor,
+)
 from vla_chess.control.planner import ArmQpos, MoveSpec, Plan, PlanInfeasible, plan_move
 from vla_chess.control.sampling import SampleKnobs, plan_candidate, sample_candidates
 from vla_chess.dataset.observe import DEFAULT_FPS, Frame, ObservationRecorder
@@ -162,6 +168,21 @@ def move_scene_description(
     )
 
 
+@dataclass(frozen=True)
+class DartKnobs:
+    """How the kept episode's executed actions are perturbed (DART), when they are at all.
+
+    The noise is an `ActionNoise` process on the arm joints; the recorded labels stay the clean
+    expert commands. A noisy rollout can knock the grasp loose, and the time-indexed expert has no
+    way to re-grasp, so a draw only counts if the move still succeeds — up to `retries` draws are
+    tried before the slot is logged as a miss rather than falling back to a clean demonstration.
+    """
+
+    sigma: float
+    tau: float = 0.3
+    retries: int = 8
+
+
 class EpisodeRunner:
     """Turns moves into recorded episodes, one scene per move, on a fixed board layout.
 
@@ -253,6 +274,7 @@ class EpisodeRunner:
         *,
         base_seed: int = 0,
         selection: CandidateSelection = CandidateSelection.FIRST,
+        dart: DartKnobs | None = None,
     ) -> FunnelOutcome:
         """Sample candidates for one move, execute each, and record an accepted one.
 
@@ -273,6 +295,9 @@ class EpisodeRunner:
             base_seed: Seed of the move's first candidate; each attempt offsets from it, and the
                 random keep draw is taken from it too, so a slot is reproducible from its seed.
             selection: Whether to keep the first accepted candidate or one drawn at random.
+            dart: When set, the kept plan is recorded under injected action noise: draws are
+                dry-run (unrendered) until one still completes the move, and that same seeded
+                draw is then re-run with the cameras attached. None records it clean.
 
         Returns:
             The outcome: the recorded episode when a candidate placed the piece (None otherwise),
@@ -313,13 +338,42 @@ class EpisodeRunner:
             return FunnelOutcome(episode=None, attempts=tuple(attempts))
 
         kept = select_kept(accepted, selection, np.random.default_rng(base_seed))
+
+        def noise_for(draw: int) -> ActionNoise | None:
+            if dart is None:
+                return None
+            rng = np.random.default_rng([base_seed, draw])
+            return ActionNoise(dart.sigma, dart.tau, self._control_hz, rng)
+
+        draw = 0
+        if dart is not None:
+            for draw in range(dart.retries):
+                trial = executor.run(
+                    make_data(model, index),
+                    kept,
+                    ik_abort=TILTED_IK_ABORT,
+                    action_noise=noise_for(draw),
+                )
+                if trial.succeeded:
+                    break
+            else:
+                return FunnelOutcome(episode=None, attempts=tuple(attempts))
+
         data = make_data(model, index)
         with Renderer(model, self._cameras) as renderer:
             recorder = ObservationRecorder(renderer, fps=self._fps, control_hz=self._control_hz)
             result = executor.run(
-                data, kept, on_control_step=recorder.on_control_step, ik_abort=TILTED_IK_ABORT
+                data,
+                kept,
+                on_control_step=recorder.on_control_step,
+                ik_abort=TILTED_IK_ABORT,
+                action_noise=noise_for(draw),
             )
             frames = recorder.frames(result)
+        if dart is not None and not result.succeeded:
+            # The rendered re-run must reproduce the dry run it was chosen from; if it did not,
+            # keep nothing rather than a demonstration whose noisy execution dropped the piece.
+            return FunnelOutcome(episode=None, attempts=tuple(attempts))
         episode = Episode(
             spec=move,
             instruction=kept.instruction,

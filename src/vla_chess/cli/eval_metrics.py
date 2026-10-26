@@ -1,0 +1,598 @@
+"""Quantitative closed-loop metrics for a fine-tuned SmolVLA policy, measured in parallel.
+
+Where `eval_rollout` drives one move and renders an mp4, this harness runs *many* rollouts of a
+move and reports rates with confidence intervals. It separates the two things that "success" had
+been conflating:
+
+  * **grasp** — did the policy ever close both jaws on the piece (and lift it), and
+  * **placement** — did the piece come to rest, upright, on the target square.
+
+and it measures **trajectory displacement** of each policy rollout against the scripted expert's
+trajectory for the same move (joint-space and TCP-space, plus terminal piece error).
+
+It also provides the **expert baseline**: the scripted oracle's own per-frame actions replayed
+through the *identical* eval stepping (the fps -> substep cadence used for the policy, not the
+executor's native 50 Hz control loop) and scored the same way. That is the sanity floor — if the
+expert itself does not place under the eval cadence, the eval, not the policy, is the problem.
+
+Parallelism: a worker pool loads the policy once per process and runs a share of the rollouts. The
+binding resource is **GPU memory** (one ~1.8 GB fp32 model copy + CUDA context per worker, so a
+16 GB card holds ~5) and **CPU cores** (each rollout is a CPU-bound sim+render loop, ~1 worker per
+vCPU) — pick `--workers` as the min of the two. The GPU compute itself is nearly idle.
+
+Runs in the `eval` pixi env. Example (1000 rollouts of the one move that worked, 5 workers):
+
+    pixi run -e eval python -m vla_chess.cli.eval_metrics \
+        --repo-id hugginggeorge/smolvla-chess-exp2 --revision 020000 \
+        --source d7 --target d6 --fps 30 --n-action-steps 10 \
+        --rollouts 1000 --workers 5 --device cuda --out runpod/artifacts/metrics-d7d6.json
+
+    # expert baseline (10 reps of the scripted oracle through the same eval setting):
+    pixi run -e eval python -m vla_chess.cli.eval_metrics --expert-baseline \
+        --source d7 --target d6 --fps 30 --reps 10 --out runpod/artifacts/expert-d7d6.json
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import time
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+os.environ.setdefault("MUJOCO_GL", "egl")
+os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+
+import mujoco
+
+from vla_chess.cli.eval_rollout import (
+    _load_policy,
+    _observation,
+    _spec_for,
+    substeps_per_frame,
+)
+from vla_chess.control.executor import Executor
+from vla_chess.control.planner import MoveSpec
+from vla_chess.dataset.episode import (
+    WRIST_CAMERA,
+    EpisodeRunner,
+    git_engine_version,
+    move_scene_description,
+)
+from vla_chess.dataset.observe import DEFAULT_FPS
+from vla_chess.sensor.render import Renderer
+from vla_chess.sim.positions import single_pawn_position
+from vla_chess.sim.scene import (
+    BIRDS_EYE_ARM_QPOS,
+    DEFAULT_BOARD_POSE,
+    build_scene,
+    make_data,
+)
+
+
+def _load_local(mdir: str, device: str) -> tuple[Any, Any, Any]:
+    """Load a SmolVLA checkpoint straight from a local directory, no Hub round-trip.
+
+    The Exp-2 final model lives only on disk (it was never pushed to the Hub), so the sweep loads
+    the flat `pretrained_model` directory directly rather than through `snapshot_download`.
+
+    Args:
+        mdir: Path to a `pretrained_model` directory (config.json + model.safetensors + processors).
+        device: Torch device to place the policy on.
+
+    Returns:
+        The policy and its pre/post processors, ready for `select_action`.
+    """
+    import torch
+    from lerobot.policies import make_pre_post_processors
+    from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
+    from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+
+    torch.set_num_threads(1)  # one thread per worker; the pool, not torch, provides the parallelism
+    cfg = SmolVLAConfig.from_pretrained(mdir)
+    cfg.device = device
+    cfg.use_amp = False
+    policy = SmolVLAPolicy.from_pretrained(mdir, config=cfg)
+    policy.eval()
+    policy.to(device)
+    pre, post = make_pre_post_processors(
+        policy_cfg=cfg,
+        pretrained_path=mdir,
+        preprocessor_overrides={"device_processor": {"device": device}},
+    )
+    return policy, pre, post
+
+
+# How far above the board surface the piece must rise, while both jaws bear on it, to count the
+# grasp as a *lift* rather than a jaws-closed-but-piece-still-grounded touch. One centimetre clears
+# the settle tolerance so a piece merely nudged on its square is not read as lifted.
+LIFT_CLEARANCE_M = 0.01
+
+# Points the policy and expert trajectories are resampled to on a shared normalized time axis
+# before they are compared, so a 30 fps rollout and a differently-lengthed expert trace line up
+# regardless of their raw step counts.
+TRAJECTORY_SAMPLES = 100
+
+
+@dataclass(frozen=True)
+class RolloutMetrics:
+    """Per-rollout outcome for one policy draw of a move."""
+
+    index: int
+    grasped: bool  # both jaws ever bore on the piece
+    lifted: bool  # ... while the piece was clear of the board
+    placed: bool  # came to rest upright on the target square
+    settled: bool
+    final_square: str | None
+    terminal_to_target_m: float  # piece resting distance from the target-square centre
+    terminal_to_expert_m: float  # piece resting distance from the expert's final piece pose
+    joint_disp_mean: float  # mean per-sample arm-joint L2 vs expert (rad)
+    joint_disp_max: float
+    tcp_disp_mean: float  # mean per-sample TCP L2 vs expert (m)
+    tcp_disp_max: float
+
+
+def wilson_interval(successes: int, total: int, z: float = 1.96) -> tuple[float, float, float]:
+    """Point estimate and Wilson score 95% interval for a binomial rate.
+
+    The Wilson interval is used rather than the normal approximation because the rates here sit
+    near 0, where the naive interval undercovers and can dip below zero.
+
+    Args:
+        successes: Number of successful trials.
+        total: Number of trials.
+        z: Standard-normal quantile for the interval (1.96 for 95%).
+
+    Returns:
+        The observed rate and the lower and upper interval bounds, each in [0, 1]. A zero-trial
+        input returns all zeros.
+    """
+    if total == 0:
+        return 0.0, 0.0, 0.0
+    p = successes / total
+    denom = 1.0 + z * z / total
+    centre = (p + z * z / (2 * total)) / denom
+    half = (z / denom) * math.sqrt(p * (1 - p) / total + z * z / (4 * total * total))
+    return p, max(0.0, centre - half), min(1.0, centre + half)
+
+
+def _resample(trace: np.ndarray, samples: int) -> np.ndarray:
+    """Resample a (T, D) trajectory to `samples` points on a normalized [0, 1] time axis.
+
+    Length-independent alignment: the policy rollout and the scripted expert run for different
+    numbers of steps (30 fps vs the executor's 50 Hz control), so both are stretched onto the same
+    axis before any per-point distance is taken.
+
+    Args:
+        trace: Per-step values, shape (T, D), T >= 1.
+        samples: Number of output points.
+
+    Returns:
+        The resampled trajectory, shape (samples, D).
+    """
+    length = len(trace)
+    if length == 1:
+        return np.repeat(trace[:1], samples, axis=0)
+    source = np.linspace(0.0, 1.0, length)
+    target = np.linspace(0.0, 1.0, samples)
+    return np.stack([np.interp(target, source, trace[:, d]) for d in range(trace.shape[1])], axis=1)
+
+
+@dataclass(frozen=True)
+class _Reference:
+    """The scripted expert's trace for a move, used as the displacement baseline."""
+
+    joint_samples: np.ndarray  # (TRAJECTORY_SAMPLES, 5) arm joints, resampled
+    tcp_samples: np.ndarray  # (TRAJECTORY_SAMPLES, 3) TCP position, resampled
+    final_piece_xyz: np.ndarray  # (3,) where the expert left the piece
+    per_frame_actions: np.ndarray  # (F, 6) expert action per dataset frame, for replay
+    grasped: bool
+    placed: bool
+
+
+def _build_move_scene(spec: MoveSpec) -> tuple[Any, Any, Any, Executor, int]:
+    """Build the lone-pawn scene for a move and its executor, as the policy rollout sees it.
+
+    Returns:
+        The model, scene index, fresh data, an executor bound to them, and the body id of the
+        piece being moved.
+    """
+    pieces = single_pawn_position(spec.source)
+    description = move_scene_description(spec, pieces, DEFAULT_BOARD_POSE, BIRDS_EYE_ARM_QPOS)
+    model, index = build_scene(description)
+    data = make_data(model, index)
+    executor = Executor(model, index)
+    piece_body = index.piece_body_id[spec.source]
+    return model, index, data, executor, piece_body
+
+
+def expert_reference(spec: MoveSpec, fps: float, seed: int = 0) -> _Reference:
+    """Run the scripted oracle for the move and distil the trace the policy is scored against.
+
+    The scripted oracle on the default board — the scene a policy rollout of this move also runs
+    in, so the displacement is policy-vs-expert. The seed drives the grasp solver's random
+    restarts: `seed=0` is the canonical reference the policy sweep measures against; the expert
+    baseline varies the seed per rep so its ten runs are independent draws rather than one
+    trajectory scored ten times.
+
+    Args:
+        spec: The move to generate the expert for.
+        fps: Capture frame rate; sets the per-frame action trace used for replay and comparison.
+        seed: Grasp-solver seed for this expert draw.
+
+    Returns:
+        The expert reference: resampled joint and TCP traces, its final piece pose, its per-frame
+        action trace, and its own grasp/placement verdict.
+    """
+    runner = EpisodeRunner(
+        fps=fps, pieces=single_pawn_position(spec.source), engine_version=git_engine_version()
+    )
+    episode = runner.run(spec, seed=seed)
+    _, _, _, executor, _ = _build_move_scene(spec)
+    states = np.stack([f.state for f in episode.frames])  # (F, 6)
+    joints = states[:, :5]
+    tcp = np.stack([executor.tcp_position(q) for q in joints])  # (F, 3)
+    return _Reference(
+        joint_samples=_resample(joints, TRAJECTORY_SAMPLES),
+        tcp_samples=_resample(tcp, TRAJECTORY_SAMPLES),
+        final_piece_xyz=_expert_final_piece(spec),
+        per_frame_actions=np.stack([f.action for f in episode.frames]),
+        grasped=bool(episode.execution.grasped),
+        placed=bool(episode.execution.placed),
+    )
+
+
+def _expert_final_piece(spec: MoveSpec) -> np.ndarray:
+    """Target-square centre as the expert's intended final piece position.
+
+    The expert places cleanly, so the target-square centre is its resting pose to within the
+    settle tolerance; using the geometric centre avoids re-stepping the sim to read the body.
+    """
+    _, index, _, _, _ = _build_move_scene(spec)
+    return np.asarray(index.board.square_to_world(spec.target, index.board_pose), dtype=float)
+
+
+def _drive_once(
+    policy: Any,
+    pre: Any,
+    post: Any,
+    spec: MoveSpec,
+    max_frames: int,
+    frame_substeps: int,
+    index_label: int,
+    reference: _Reference,
+) -> RolloutMetrics:
+    """Drive one policy rollout of a move, logging grasp, placement and displacement.
+
+    Mirrors `eval_rollout.drive` but additionally polls the two-jaw grasp each frame, tracks the
+    piece height to tell a lift from a grounded touch, and scores the trajectory against the
+    scripted expert reference. No frames are rendered to disk — only the metrics are kept.
+
+    Args:
+        policy, pre, post: The loaded SmolVLA policy and its processors.
+        spec: The move to drive.
+        max_frames: Frames to drive before scoring.
+        frame_substeps: Sim substeps advanced per policy step (from `substeps_per_frame(fps)`).
+        index_label: This rollout's index, carried into the result for logging.
+        reference: The expert trace to measure displacement against.
+
+    Returns:
+        The rollout's grasp/placement/displacement metrics.
+    """
+    import torch
+
+    model, index, data, executor, piece_body = _build_move_scene(spec)
+    renderer = Renderer(model, [WRIST_CAMERA])
+    surface = index.board.surface_height
+    instruction = spec.instruction()
+    policy.reset()
+
+    joints: list[np.ndarray] = []
+    grasped = lifted = False
+    for _ in range(max_frames):
+        frame = np.array(renderer.render(data)[WRIST_CAMERA.name], copy=True)
+        state = executor._state(data)
+        joints.append(state[:5].astype(np.float64))
+        obs = _observation(frame, state, instruction)
+        with torch.inference_mode():
+            action = post(policy.select_action(pre(obs)))
+        action_np = action.squeeze(0).to(torch.float32).cpu().numpy()
+        executor._write_ctrl(data, action_np[:5], float(action_np[5]))
+        for _ in range(frame_substeps):
+            mujoco.mj_step(model, data)
+        if executor._holding(data, piece_body):
+            grasped = True
+            if float(data.xpos[piece_body][2]) - surface > LIFT_CLEARANCE_M:
+                lifted = True
+
+    check = executor.placement(data, spec.source, spec.target)
+    piece_xyz = np.asarray(data.xpos[piece_body], dtype=float)
+    target_xyz = np.asarray(index.board.square_to_world(spec.target, index.board_pose), dtype=float)
+
+    policy_joints = _resample(np.stack(joints), TRAJECTORY_SAMPLES)
+    policy_tcp = _resample(
+        np.stack([executor.tcp_position(q) for q in np.stack(joints)]), TRAJECTORY_SAMPLES
+    )
+    joint_l2 = np.linalg.norm(policy_joints - reference.joint_samples, axis=1)
+    tcp_l2 = np.linalg.norm(policy_tcp - reference.tcp_samples, axis=1)
+
+    return RolloutMetrics(
+        index=index_label,
+        grasped=grasped,
+        lifted=lifted,
+        placed=bool(check.placed),
+        settled=bool(check.settled),
+        final_square=check.final_square,
+        terminal_to_target_m=float(np.linalg.norm(piece_xyz[:2] - target_xyz[:2])),
+        terminal_to_expert_m=float(np.linalg.norm(piece_xyz[:2] - reference.final_piece_xyz[:2])),
+        joint_disp_mean=float(joint_l2.mean()),
+        joint_disp_max=float(joint_l2.max()),
+        tcp_disp_mean=float(tcp_l2.mean()),
+        tcp_disp_max=float(tcp_l2.max()),
+    )
+
+
+# --- worker-pool plumbing: each process loads the policy once and keeps it in a module global ---
+_WORKER: dict[str, Any] = {}
+
+
+def _init_worker(
+    repo_id: str,
+    revision: str,
+    device: str,
+    n_action_steps: int | None,
+    source: str,
+    target: str,
+    episode: int,
+    fps: float,
+    max_frames: int,
+    local_checkpoint: str | None,
+) -> None:
+    """Load the policy once in this worker process and cache it with the reference trace."""
+    if local_checkpoint is not None:
+        policy, pre, post = _load_local(local_checkpoint, device)
+    else:
+        policy, pre, post = _load_policy(repo_id, revision, device)
+    if n_action_steps is not None:
+        policy.config.n_action_steps = n_action_steps
+    spec = _spec_for(episode, source, target)
+    _WORKER.update(
+        policy=policy,
+        pre=pre,
+        post=post,
+        spec=spec,
+        max_frames=max_frames,
+        frame_substeps=substeps_per_frame(fps),
+        reference=expert_reference(spec, fps),
+    )
+
+
+def _run_index(index_label: int) -> RolloutMetrics:
+    """Run one rollout in a pool worker using the process-cached policy and reference."""
+    w = _WORKER
+    return _drive_once(
+        w["policy"],
+        w["pre"],
+        w["post"],
+        w["spec"],
+        w["max_frames"],
+        w["frame_substeps"],
+        index_label,
+        w["reference"],
+    )
+
+
+def run_policy_sweep(args: argparse.Namespace) -> dict[str, Any]:
+    """Run `args.rollouts` policy rollouts of one move across a worker pool and aggregate.
+
+    Returns:
+        A report dict: grasp/lift/placement rates with Wilson 95% intervals, displacement
+        summaries, and the full per-rollout records.
+    """
+    import multiprocessing as mp
+
+    init = (
+        args.repo_id,
+        args.revision,
+        args.device,
+        args.n_action_steps,
+        args.source,
+        args.target,
+        args.episode,
+        args.fps,
+        args.max_frames,
+        args.local_checkpoint,
+    )
+    started = time.monotonic()
+    records: list[RolloutMetrics] = []
+    if args.workers <= 1:
+        _init_worker(*init)
+        for i in range(args.rollouts):
+            records.append(_run_index(i))
+            print(f"[{int(time.monotonic() - started)}s] {i + 1}/{args.rollouts}", flush=True)
+    else:
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(args.workers, initializer=_init_worker, initargs=init) as pool:
+            for done, rec in enumerate(pool.imap_unordered(_run_index, range(args.rollouts)), 1):
+                records.append(rec)
+                print(f"[{int(time.monotonic() - started)}s] {done}/{args.rollouts}", flush=True)
+
+    records.sort(key=lambda r: r.index)
+    n = len(records)
+    grasp_p, grasp_lo, grasp_hi = wilson_interval(sum(r.grasped for r in records), n)
+    lift_p, lift_lo, lift_hi = wilson_interval(sum(r.lifted for r in records), n)
+    place_p, place_lo, place_hi = wilson_interval(sum(r.placed for r in records), n)
+
+    def summary(values: list[float]) -> dict[str, float]:
+        a = np.asarray(values)
+        return {
+            "mean": float(a.mean()),
+            "median": float(np.median(a)),
+            "p95": float(np.percentile(a, 95)),
+            "max": float(a.max()),
+        }
+
+    return {
+        "mode": "policy_sweep",
+        "move": f"{args.source}->{args.target}",
+        "repo_id": args.repo_id,
+        "revision": args.revision,
+        "fps": args.fps,
+        "n_action_steps": args.n_action_steps,
+        "max_frames": args.max_frames,
+        "rollouts": n,
+        "workers": args.workers,
+        "wall_seconds": round(time.monotonic() - started, 1),
+        "grasp_rate": {"p": grasp_p, "ci95": [grasp_lo, grasp_hi]},
+        "lift_rate": {"p": lift_p, "ci95": [lift_lo, lift_hi]},
+        "placement_rate": {"p": place_p, "ci95": [place_lo, place_hi]},
+        "terminal_to_target_m": summary([r.terminal_to_target_m for r in records]),
+        "joint_disp_mean_rad": summary([r.joint_disp_mean for r in records]),
+        "tcp_disp_mean_m": summary([r.tcp_disp_mean for r in records]),
+        "records": [asdict(r) for r in records],
+    }
+
+
+def _replay_expert_through_eval(
+    spec: MoveSpec, actions: np.ndarray, frame_substeps: int
+) -> tuple[bool, bool, bool, str | None]:
+    """Replay a scripted action trace through the policy eval's stepping and score it.
+
+    The expert's per-frame actions are written one per frame and stepped `frame_substeps` substeps
+    each — the exact cadence the policy rollout runs at, which differs from the executor's native
+    50 Hz control loop. This is what "run the expert through the same eval setting" measures.
+
+    Returns:
+        Whether the piece was grasped (two jaws), lifted clear, placed, and its final square.
+    """
+    model, index, data, executor, piece_body = _build_move_scene(spec)
+    surface = index.board.surface_height
+    grasped = lifted = False
+    for action in actions:
+        executor._write_ctrl(data, action[:5], float(action[5]))
+        for _ in range(frame_substeps):
+            mujoco.mj_step(model, data)
+        if executor._holding(data, piece_body):
+            grasped = True
+            if float(data.xpos[piece_body][2]) - surface > LIFT_CLEARANCE_M:
+                lifted = True
+    check = executor.placement(data, spec.source, spec.target)
+    return grasped, lifted, bool(check.placed), check.final_square
+
+
+def run_expert_baseline(args: argparse.Namespace) -> dict[str, Any]:
+    """Replay the scripted oracle through the eval cadence `args.reps` times and aggregate.
+
+    Each rep regenerates the oracle with its own seed, so the ten runs are independent expert
+    draws, then replays that draw through the eval cadence. A clean recipe is `reps`/`reps`; any
+    failure is the eval cadence (fps -> substeps) failing to preserve a trajectory the executor's
+    own 50 Hz loop placed — exactly the floor to rule out before blaming the policy.
+
+    Returns:
+        A report dict: grasp and placement counts over the reps and the per-rep records.
+    """
+    spec = _spec_for(args.episode, args.source, args.target)
+    frame_substeps = substeps_per_frame(args.fps)
+    reps: list[dict[str, Any]] = []
+    native_grasped = native_placed = 0
+    started = time.monotonic()
+    for r in range(args.reps):
+        reference = expert_reference(spec, args.fps, seed=r)
+        native_grasped += int(reference.grasped)
+        native_placed += int(reference.placed)
+        grasped, lifted, placed, final = _replay_expert_through_eval(
+            spec, reference.per_frame_actions, frame_substeps
+        )
+        reps.append(
+            {
+                "rep": r,
+                "grasped": grasped,
+                "lifted": lifted,
+                "placed": placed,
+                "final_square": final,
+            }
+        )
+        print(
+            f"[{int(time.monotonic() - started)}s] expert rep {r + 1}/{args.reps}: "
+            f"{'PLACED' if placed else 'fail'} (grasp={grasped}, ended {final})",
+            flush=True,
+        )
+    return {
+        "mode": "expert_baseline",
+        "move": f"{args.source}->{args.target}",
+        "fps": args.fps,
+        "reps": args.reps,
+        "frame_substeps": frame_substeps,
+        "native_executor_grasped": native_grasped,
+        "native_executor_placed": native_placed,
+        "grasp_count": sum(x["grasped"] for x in reps),
+        "placement_count": sum(x["placed"] for x in reps),
+        "records": reps,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo-id", default="hugginggeorge/smolvla-chess-exp2")
+    parser.add_argument("--revision", default="020000")
+    parser.add_argument("--source", required=True, help="start square, e.g. d7")
+    parser.add_argument("--target", required=True, help="target square, e.g. d6")
+    parser.add_argument("--episode", type=int, default=0)
+    parser.add_argument("--fps", type=float, default=DEFAULT_FPS)
+    parser.add_argument("--max-frames", type=int, default=500)
+    parser.add_argument(
+        "--n-action-steps",
+        type=int,
+        default=None,
+        help="override the policy's action-chunk horizon (e.g. 10)",
+    )
+    parser.add_argument("--rollouts", type=int, default=1000, help="policy rollouts to run")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=5,
+        help="parallel worker processes; one model copy (~2.5-3 GB VRAM) each",
+    )
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--local-checkpoint",
+        default=None,
+        help="load the policy from this local pretrained_model dir instead of the "
+        "Hub (the Exp-2 final model lives only on disk)",
+    )
+    parser.add_argument("--reps", type=int, default=10, help="expert-baseline repetitions")
+    parser.add_argument(
+        "--expert-baseline",
+        action="store_true",
+        help="replay the scripted oracle through the eval cadence instead of running the policy",
+    )
+    parser.add_argument("--out", type=Path, required=True, help="where the JSON report is written")
+    args = parser.parse_args()
+
+    report = run_expert_baseline(args) if args.expert_baseline else run_policy_sweep(args)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(report, indent=2))
+    print(f"wrote {args.out}", flush=True)
+    if args.expert_baseline:
+        print(
+            f"=== expert baseline: placed {report['placement_count']}/{report['reps']}, "
+            f"grasped {report['grasp_count']}/{report['reps']} ===",
+            flush=True,
+        )
+    else:
+        g, p = report["grasp_rate"], report["placement_rate"]
+        print(
+            f"=== grasp {g['p']:.1%} (95% CI {g['ci95'][0]:.1%}-{g['ci95'][1]:.1%}) | "
+            f"placement {p['p']:.1%} (95% CI {p['ci95'][0]:.1%}-{p['ci95'][1]:.1%}) "
+            f"over {report['rollouts']} rollouts ===",
+            flush=True,
+        )
+
+
+if __name__ == "__main__":
+    main()
