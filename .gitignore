@@ -10,6 +10,7 @@ __pycache__/
 htmlcov/
 
 # secrets
+/.env
 runpod/.env
 
 # training + data artifacts (datasets live on HF, e.g. hugginggeorge/chess-pawns-v1)
