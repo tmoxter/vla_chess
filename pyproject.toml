@@ -167,6 +167,13 @@ ignore_missing_imports = true
 module = ["lerobot.*", "torch", "huggingface_hub"]
 ignore_missing_imports = true
 
+# mlflow is only installed in the track env. Without it, mypy resolves `mlflow` to the repo's local
+# mlflow/ tracking store as a namespace package, so it is skipped rather than merely missing.
+[[tool.mypy.overrides]]
+module = ["mlflow", "mlflow.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
