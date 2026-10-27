@@ -25,7 +25,18 @@ WORKERS="${WORKERS:-5}"
 N_ACTION_STEPS="${N_ACTION_STEPS:-10}"
 PER_ROLLOUT="${PER_ROLLOUT:-2}"
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-8}"
-SHARDS="${SHARDS:-$(nproc)}"
+# One takeover shard per CPU the container may use: nproc reports the host's cores, while the
+# cgroup quota is what the shards actually get.
+cpu_quota() {
+  local quota period
+  if [[ -r /sys/fs/cgroup/cpu.max ]] && read -r quota period </sys/fs/cgroup/cpu.max \
+      && [[ "${quota}" != "max" ]]; then
+    echo $(( quota / period > 0 ? quota / period : 1 ))
+  else
+    nproc
+  fi
+}
+SHARDS="${SHARDS:-$(cpu_quota)}"
 SEED="${SEED:-0}"
 STEPS="${STEPS:-10000}"
 SAVE_FREQ="${SAVE_FREQ:-2000}"
