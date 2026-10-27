@@ -23,10 +23,16 @@ from vla_chess.cli.generate_dataset import _parse_shard, serialize
 from vla_chess.dataset.capture import save_capture
 from vla_chess.dataset.episode import git_engine_version
 from vla_chess.dataset.rollouts import load_rollout
-from vla_chess.dataset.takeover import TakeoverRunner, take_over_rollout
+from vla_chess.dataset.takeover import (
+    TakeoverRunner,
+    carry_order,
+    take_over_rollout,
+    takeover_order,
+)
 from vla_chess.sim.positions import single_pawn_position
 
 MANIFEST_NAME = "takeover-manifest.json"
+FRAME_ORDERS = ("random", "carry")
 
 
 def _tally_path(captures: Path, rollout: Path) -> Path:
@@ -41,6 +47,9 @@ def take_over(
     wanted: int,
     skip: int,
     max_attempts: int,
+    frame_order: str,
+    carry_lead: int,
+    carry_per_tier: int,
     fps: float,
     seed: int,
     shard: tuple[int, int],
@@ -53,6 +62,10 @@ def take_over(
         wanted: Kept takeovers to stop at per rollout.
         skip: Leading frames of a rollout never taken over from.
         max_attempts: Recoverable frames tried at most per rollout.
+        frame_order: "random" tries frames in a random order; "carry" tries the frames
+            carrying the piece first, those just before a mid-air release ahead of the rest.
+        carry_lead: Held frames before a mid-air release that "carry" may put first.
+        carry_per_tier: Frames each held tier of "carry" puts ahead of the rest.
         fps: Capture frame rate of the kept episodes.
         seed: Base seed; rollout `i` shuffles its frames from `[seed, i]`.
         shard: `(i, n)` — take over only the rollouts whose index is `i` mod `n`.
@@ -69,13 +82,20 @@ def take_over(
             pieces=single_pawn_position(rollout.source), fps=fps, engine_version=engine_version
         )
         started = time.monotonic()
+        rng = np.random.default_rng([seed, i])
+        if frame_order == "carry":
+            trace = runner.grip_trace(rollout.spec(), rollout.snapshots)
+            order = carry_order(trace, skip, carry_lead, carry_per_tier, rng)
+        elif frame_order == "random":
+            order = takeover_order(len(rollout.snapshots), skip, rng)
+        else:
+            raise ValueError(f"unknown frame order {frame_order!r}; pick one of {FRAME_ORDERS}")
         tried = take_over_rollout(
             rollout,
             runner,
             wanted=wanted,
-            skip=skip,
             max_attempts=max_attempts,
-            rng=np.random.default_rng([seed, i]),
+            order=order,
             base_seed=seed * 1_000_000 + i * 1_000,
         )
         frames: list[dict[str, object]] = []
@@ -163,6 +183,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-attempts", type=int, default=8, help="recoverable frames tried per rollout"
     )
+    parser.add_argument(
+        "--frame-order",
+        choices=FRAME_ORDERS,
+        required=True,
+        help="random: any frame; carry: frames carrying the piece first",
+    )
+    parser.add_argument(
+        "--carry-lead",
+        type=int,
+        default=45,
+        help="held frames before a mid-air release eligible first under --frame-order carry",
+    )
+    parser.add_argument(
+        "--carry-per-tier",
+        type=int,
+        default=3,
+        help="frames each held tier puts ahead of the rest under --frame-order carry",
+    )
     parser.add_argument("--fps", type=float, default=30.0, help="capture rate of kept episodes")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--shard", default="0/1", help="'i/n': only rollouts with index i mod n")
@@ -193,6 +231,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         wanted=args.per_rollout,
         skip=args.skip_frames,
         max_attempts=args.max_attempts,
+        frame_order=args.frame_order,
+        carry_lead=args.carry_lead,
+        carry_per_tier=args.carry_per_tier,
         fps=args.fps,
         seed=args.seed,
         shard=_parse_shard(args.shard),

@@ -38,6 +38,7 @@ from vla_chess.dataset.observe import DEFAULT_FPS, ObservationRecorder
 from vla_chess.dataset.rollouts import RecordedRollout
 from vla_chess.grasp.solver import VerticalGraspSolver
 from vla_chess.sensor.render import CameraSpec, Renderer
+from vla_chess.sim.collision import grip_contacts
 from vla_chess.sim.scene import (
     BIRDS_EYE_ARM_QPOS,
     DEFAULT_BOARD_POSE,
@@ -53,6 +54,10 @@ WRONG_SQUARE = "wrong_square"
 NOT_SETTLED = "not_settled"
 PLAN_INFEASIBLE = "plan_infeasible"
 NOT_NEAR_TARGET = "direct_not_near"
+
+# A piece let go of with its base higher than this above the playing surface was dropped rather
+# than set down, in metres.
+AIR_RELEASE = 0.003
 
 
 @dataclass(frozen=True)
@@ -74,6 +79,49 @@ def _reject_reason(result: ExecutionResult, target: str) -> str | None:
     if not result.placed:
         return NOT_SETTLED
     return None
+
+
+@dataclass(frozen=True)
+class GripTrace:
+    """Whether the moved piece was held, and how high it stood, at each frame of a rollout."""
+
+    gripped: npt.NDArray[np.bool_]  # (frames,): both jaws bear on the piece
+    height: npt.NDArray[np.float64]  # (frames,): piece base above the playing surface, m
+
+
+def carry_order(
+    trace: GripTrace, skip: int, lead: int, per_tier: int, rng: np.random.Generator
+) -> list[int]:
+    """Order the frames of a rollout so the ones carrying the piece are taken over first.
+
+    Up to `per_tier` held frames from the last `lead` before a mid-air release (one with the
+    piece base above `AIR_RELEASE`) come first, then up to `per_tier` other held frames, then
+    every remaining frame in a random order. The cap keeps a rollout whose grip cannot be saved
+    from spending its whole budget on held frames.
+
+    Args:
+        trace: The rollout's grip trace.
+        skip: How many leading frames to leave out; the policy has barely acted on them.
+        lead: How many held frames before a mid-air release are eligible for the first tier.
+        per_tier: How many frames each of the two held tiers puts ahead of the rest.
+        rng: Source of the shuffles.
+
+    Returns:
+        Every frame index from `skip` on, for the caller to try until it has as many takeovers
+        as it wants.
+    """
+    frames = len(trace.gripped)
+    candidates = np.arange(min(skip, frames), frames)
+    held = trace.gripped[candidates]
+    before_drop = np.zeros(frames, dtype=bool)
+    releases = np.flatnonzero(trace.gripped[:-1] & ~trace.gripped[1:])
+    for release in releases:
+        if trace.height[release] > AIR_RELEASE:
+            before_drop[max(0, release - lead + 1) : release + 1] = True
+    first = rng.permutation(candidates[held & before_drop[candidates]])[:per_tier]
+    second = rng.permutation(candidates[held & ~before_drop[candidates]])[:per_tier]
+    rest = rng.permutation(np.setdiff1d(candidates, np.concatenate([first, second])))
+    return [int(i) for tier in (first, second, rest) for i in tier]
 
 
 def takeover_order(frames: int, skip: int, rng: np.random.Generator) -> list[int]:
@@ -217,6 +265,32 @@ class TakeoverRunner:
         )
         return TakeoverOutcome(assessment.situation, episode, attempts, rejects)
 
+    def grip_trace(self, spec: MoveSpec, snapshots: npt.NDArray[np.float64]) -> GripTrace:
+        """Read whether the moved piece was held, and its height, at every snapshot of a rollout.
+
+        Args:
+            spec: The move the rollout was making.
+            snapshots: One state per frame, from `sim.snapshot.capture_state` in a scene of this
+                runner's layout built for `spec`.
+
+        Returns:
+            The rollout's grip trace.
+        """
+        description = move_scene_description(
+            spec, self._pieces, self._board_pose, self._survey_qpos
+        )
+        model, index = build_scene(description)
+        data = make_data(model, index)
+        body = index.piece_body_id[spec.source]
+        surface = index.board.surface_height
+        gripped = np.zeros(len(snapshots), dtype=bool)
+        height = np.zeros(len(snapshots))
+        for frame, snapshot in enumerate(snapshots):
+            restore_state(model, data, snapshot)
+            gripped[frame] = grip_contacts(model, data, body).is_gripped()
+            height[frame] = float(data.xpos[body][2]) - surface
+        return GripTrace(gripped=gripped, height=height)
+
 
 class Takeover(Protocol):
     """The part of `TakeoverRunner` the rollout loop needs."""
@@ -239,23 +313,22 @@ def take_over_rollout(
     runner: Takeover,
     *,
     wanted: int,
-    skip: int,
     max_attempts: int,
-    rng: np.random.Generator,
+    order: Sequence[int],
     base_seed: int = 0,
 ) -> list[tuple[int, TakeoverOutcome]]:
-    """Take one rollout over at random frames until enough recoveries are kept.
+    """Take one rollout over frame by frame until enough recoveries are kept.
 
-    Frames are tried in a random order. A frame whose move is finished or past saving is passed
-    over without counting against the budget; every other one counts, kept or not.
+    A frame whose move is finished or past saving is passed over without counting against the
+    budget; every other one counts, kept or not.
 
     Args:
         rollout: The recorded rollout to take over.
         runner: What records a takeover from one snapshot.
         wanted: How many kept episodes to stop at.
-        skip: How many leading frames never to take over from.
         max_attempts: How many recoverable frames to try at most.
-        rng: Source of the frame order.
+        order: The frames to try, in the order to try them; see `takeover_order` and
+            `carry_order`.
         base_seed: Offset of the per-frame seeds; frame `f` is taken over with
             `base_seed + f`.
 
@@ -265,7 +338,7 @@ def take_over_rollout(
     spec = rollout.spec()
     tried: list[tuple[int, TakeoverOutcome]] = []
     kept = attempts = 0
-    for frame in takeover_order(len(rollout.snapshots), skip, rng):
+    for frame in order:
         if kept >= wanted or attempts >= max_attempts:
             break
         outcome = runner.run(spec, rollout.snapshots[frame], base_seed=base_seed + frame)

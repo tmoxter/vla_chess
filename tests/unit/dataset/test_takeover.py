@@ -8,8 +8,10 @@ from vla_chess.control.sampling import SampleKnobs, plan_candidate, sample_candi
 from vla_chess.dataset.episode import move_scene_description
 from vla_chess.dataset.rollouts import RecordedRollout
 from vla_chess.dataset.takeover import (
+    GripTrace,
     TakeoverOutcome,
     TakeoverRunner,
+    carry_order,
     take_over_rollout,
     takeover_order,
 )
@@ -67,6 +69,58 @@ def test_takeover_order_leaves_out_the_leading_frames_and_covers_the_rest() -> N
 
 def test_takeover_order_of_a_rollout_shorter_than_the_skip_is_empty() -> None:
     assert takeover_order(2, 5, np.random.default_rng(0)) == []
+
+
+def _trace(frames: int, held: range, release_height: float) -> GripTrace:
+    gripped = np.zeros(frames, dtype=bool)
+    gripped[held.start : held.stop] = True
+    height = np.zeros(frames)
+    height[held.stop - 1] = release_height
+    return GripTrace(gripped=gripped, height=height)
+
+
+def test_carry_order_tries_the_frames_before_a_mid_air_release_first() -> None:
+    order = carry_order(
+        _trace(40, range(10, 30), 0.02), skip=2, lead=5, per_tier=3, rng=np.random.default_rng(0)
+    )
+    assert set(order[:3]) <= set(range(25, 30))
+    assert set(order[3:6]) <= set(range(10, 25))
+    assert sorted(order) == list(range(2, 40))
+
+
+def test_carry_order_puts_held_frames_first_when_the_piece_is_set_down() -> None:
+    order = carry_order(
+        _trace(40, range(10, 30), 0.001), skip=0, lead=5, per_tier=3, rng=np.random.default_rng(0)
+    )
+    assert set(order[:3]) <= set(range(10, 30))
+    assert sorted(order) == list(range(40))
+
+
+def test_carry_order_caps_the_held_frames_put_first() -> None:
+    order = carry_order(
+        _trace(400, range(10, 300), 0.02), skip=0, lead=45, per_tier=2, rng=np.random.default_rng(0)
+    )
+    assert set(order[:2]) <= set(range(255, 300))
+    assert set(order[2:4]) <= set(range(10, 255))
+    # The rest is shuffled across held and unheld frames alike.
+    assert not set(order[4:20]) <= set(range(10, 300))
+
+
+def test_carry_order_of_a_rollout_that_never_grips_covers_every_frame() -> None:
+    trace = GripTrace(gripped=np.zeros(12, dtype=bool), height=np.zeros(12))
+    order = carry_order(trace, skip=3, lead=5, per_tier=3, rng=np.random.default_rng(0))
+    assert sorted(order) == list(range(3, 12))
+
+
+def test_the_grip_trace_reads_the_piece_held_mid_transport(
+    snapshots: dict[Phase, np.ndarray],
+) -> None:
+    runner = TakeoverRunner(pieces=PIECES, fps=10.0)
+    trace = runner.grip_trace(
+        MOVE, np.stack([snapshots[Phase.APPROACH], snapshots[Phase.TRANSPORT]])
+    )
+    assert trace.gripped.tolist() == [False, True]
+    assert trace.height[0] < 0.003 < trace.height[1]
 
 
 def test_a_takeover_mid_transport_records_the_expert_finishing_the_move(
@@ -136,7 +190,7 @@ def _rollout(frames: int) -> RecordedRollout:
 def test_a_rollout_is_taken_over_until_enough_are_kept() -> None:
     runner = StubRunner({f: Situation.TO_GRASP for f in range(20)}, keeps=set(range(20)))
     tried = take_over_rollout(
-        _rollout(20), runner, wanted=3, skip=0, max_attempts=10, rng=np.random.default_rng(0)
+        _rollout(20), runner, wanted=3, max_attempts=10, order=list(range(20))
     )
     assert len(tried) == 3
     assert all(outcome.episode is not None for _, outcome in tried)
@@ -145,9 +199,7 @@ def test_a_rollout_is_taken_over_until_enough_are_kept() -> None:
 def test_only_recoverable_frames_count_against_the_budget() -> None:
     situations = {f: Situation.UNRECOVERABLE if f % 2 else Situation.TO_GRASP for f in range(20)}
     runner = StubRunner(situations, keeps=set())
-    tried = take_over_rollout(
-        _rollout(20), runner, wanted=3, skip=0, max_attempts=4, rng=np.random.default_rng(0)
-    )
+    tried = take_over_rollout(_rollout(20), runner, wanted=3, max_attempts=4, order=list(range(20)))
     recoverable = [f for f, o in tried if o.situation is Situation.TO_GRASP]
     assert len(recoverable) == 4
     assert len(tried) > 4
@@ -159,10 +211,9 @@ def test_each_frame_is_taken_over_with_its_own_seed() -> None:
         _rollout(10),
         runner,
         wanted=1,
-        skip=4,
         max_attempts=3,
-        rng=np.random.default_rng(1),
+        order=[7, 4, 9],
         base_seed=1000,
     )
-    assert runner.seeds == [1000 + frame for frame, _ in tried]
-    assert all(frame >= 4 for frame, _ in tried)
+    assert runner.seeds == [1007, 1004, 1009]
+    assert [frame for frame, _ in tried] == [7, 4, 9]

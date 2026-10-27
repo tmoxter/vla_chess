@@ -25,6 +25,11 @@ WORKERS="${WORKERS:-5}"
 N_ACTION_STEPS="${N_ACTION_STEPS:-10}"
 PER_ROLLOUT="${PER_ROLLOUT:-2}"
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-8}"
+# random: take over at any frame; carry: up to CARRY_PER_TIER held frames from the last
+# CARRY_LEAD before a mid-air release, then up to CARRY_PER_TIER other held frames, then the rest.
+FRAME_ORDER="${FRAME_ORDER:?set FRAME_ORDER to random or carry}"
+CARRY_LEAD="${CARRY_LEAD:-45}"
+CARRY_PER_TIER="${CARRY_PER_TIER:-3}"
 # One takeover shard per CPU the container may use: nproc reports the host's cores, while the
 # cgroup quota is what the shards actually get.
 cpu_quota() {
@@ -70,10 +75,12 @@ else
   echo "   done already"
 fi
 
-step "2/5 expert takeovers over ${SHARDS} shards (${PER_ROLLOUT} per rollout)"
+step "2/5 expert takeovers over ${SHARDS} shards (${PER_ROLLOUT} per rollout, ${FRAME_ORDER} frame order)"
 if [[ ! -f "${ROUND_DIR}/takeovers/meta/info.json" ]]; then
   common=(--rollouts "${ROUND_DIR}/rollouts" --captures "${ROUND_DIR}/takeover-captures"
-          --per-rollout "${PER_ROLLOUT}" --max-attempts "${MAX_ATTEMPTS}" --fps 30 --seed "${SEED}")
+          --per-rollout "${PER_ROLLOUT}" --max-attempts "${MAX_ATTEMPTS}"
+          --frame-order "${FRAME_ORDER}" --carry-lead "${CARRY_LEAD}"
+          --carry-per-tier "${CARRY_PER_TIER}" --fps 30 --seed "${SEED}")
   mkdir -p "${ROUND_DIR}/takeover-logs"
   pids=()
   for ((i = 0; i < SHARDS; i++)); do
