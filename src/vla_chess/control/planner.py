@@ -575,6 +575,8 @@ def plan_tilted_move(
     max_tilt_deg: float = MAX_TILT_DEG,
     hover_along_axis: float = HOVER_ALONG_AXIS,
     release_gap: float = RELEASE_GAP,
+    grasp_xy: tuple[float, float] | None = None,
+    grasp_prefer: ArmQpos | None = None,
 ) -> tuple[Plan, PlanQuality]:
     """Lay out a tilted pick-and-place as a best-effort candidate, not a gated plan.
 
@@ -600,6 +602,10 @@ def plan_tilted_move(
         max_tilt_deg: Largest lean off vertical any anchor may hold.
         hover_along_axis: How far the hovers back off along the approach axis.
         release_gap: How far above the surface the foot is aimed at release.
+        grasp_xy: World point in the board plane to grasp at, metres; the source square's centre
+            when omitted. Set it for a piece that no longer stands where its square puts it.
+        grasp_prefer: Configuration the grasp anchor is picked nearest to in roll; the survey
+            pose when omitted, which is where every plan from rest arrives from.
 
     Returns:
         The plan and a `PlanQuality` recording the lean and residual of each anchor.
@@ -614,6 +620,8 @@ def plan_tilted_move(
     ready = ready_command(radius, spec.standoff, index.gripper_joint_range)
 
     grasp_xyz = _above(board, spec.source, board_pose, spec.grasp_height)
+    if grasp_xy is not None:
+        grasp_xyz = (float(grasp_xy[0]), float(grasp_xy[1]), grasp_xyz[2])
     grasp_qpos, src_axis, grasp_tilt, grasp_err = _min_tilt_anchor(
         solver,
         _screen(model, data, index, spec.source),
@@ -622,7 +630,7 @@ def plan_tilted_move(
         rng,
         max_tilt_deg,
         grasp_tilt_target_deg,
-        prefer=spec.survey_qpos,
+        prefer=spec.survey_qpos if grasp_prefer is None else grasp_prefer,
     )
     hover_src_xyz = _stand_off(grasp_xyz, src_axis, hover_along_axis)
 

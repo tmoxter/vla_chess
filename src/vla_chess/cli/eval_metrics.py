@@ -51,11 +51,14 @@ os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 import mujoco
 
 from vla_chess.cli.eval_rollout import (
+    SUBSTEPS_PER_SECOND,
     _load_policy,
     _observation,
     _spec_for,
+    parse_moves,
     substeps_per_frame,
 )
+from vla_chess.cli.generate_dataset import EXP2_TRAINED_MOVES, one_step_moves
 from vla_chess.control.executor import Executor
 from vla_chess.control.planner import MoveSpec
 from vla_chess.dataset.episode import (
@@ -65,6 +68,7 @@ from vla_chess.dataset.episode import (
     move_scene_description,
 )
 from vla_chess.dataset.observe import DEFAULT_FPS
+from vla_chess.dataset.rollouts import RecordedRollout, rollout_path, save_rollout
 from vla_chess.sensor.render import Renderer
 from vla_chess.sim.positions import single_pawn_position
 from vla_chess.sim.scene import (
@@ -73,6 +77,7 @@ from vla_chess.sim.scene import (
     build_scene,
     make_data,
 )
+from vla_chess.sim.snapshot import capture_state
 
 
 def _load_local(mdir: str, device: str) -> tuple[Any, Any, Any]:
@@ -121,9 +126,13 @@ TRAJECTORY_SAMPLES = 100
 
 @dataclass(frozen=True)
 class RolloutMetrics:
-    """Per-rollout outcome for one policy draw of a move."""
+    """Per-rollout outcome for one policy draw of a move.
+
+    The displacement fields are NaN when the sweep ran without an expert reference.
+    """
 
     index: int
+    move: str  # "source->target"
     grasped: bool  # both jaws ever bore on the piece
     lifted: bool  # ... while the piece was clear of the board
     placed: bool  # came to rest upright on the target square
@@ -265,7 +274,8 @@ def _drive_once(
     max_frames: int,
     frame_substeps: int,
     index_label: int,
-    reference: _Reference,
+    reference: _Reference | None,
+    record: Path | None = None,
 ) -> RolloutMetrics:
     """Drive one policy rollout of a move, logging grasp, placement and displacement.
 
@@ -279,7 +289,10 @@ def _drive_once(
         max_frames: Frames to drive before scoring.
         frame_substeps: Sim substeps advanced per policy step (from `substeps_per_frame(fps)`).
         index_label: This rollout's index, carried into the result for logging.
-        reference: The expert trace to measure displacement against.
+        reference: The expert trace to measure displacement against; None skips the
+            displacement and reports it as NaN.
+        record: Directory to save the rollout's per-frame simulator snapshots under, as
+            `rollout-<index>.npz`; nothing is saved when None.
 
     Returns:
         The rollout's grasp/placement/displacement metrics.
@@ -293,8 +306,11 @@ def _drive_once(
     policy.reset()
 
     joints: list[np.ndarray] = []
+    snapshots: list[np.ndarray] = []
     grasped = lifted = False
     for _ in range(max_frames):
+        if record is not None:
+            snapshots.append(capture_state(model, data))
         frame = np.array(renderer.render(data)[WRIST_CAMERA.name], copy=True)
         state = executor._state(data)
         joints.append(state[:5].astype(np.float64))
@@ -314,22 +330,43 @@ def _drive_once(
     piece_xyz = np.asarray(data.xpos[piece_body], dtype=float)
     target_xyz = np.asarray(index.board.square_to_world(spec.target, index.board_pose), dtype=float)
 
-    policy_joints = _resample(np.stack(joints), TRAJECTORY_SAMPLES)
-    policy_tcp = _resample(
-        np.stack([executor.tcp_position(q) for q in np.stack(joints)]), TRAJECTORY_SAMPLES
-    )
-    joint_l2 = np.linalg.norm(policy_joints - reference.joint_samples, axis=1)
-    tcp_l2 = np.linalg.norm(policy_tcp - reference.tcp_samples, axis=1)
+    if record is not None:
+        save_rollout(
+            rollout_path(record, index_label),
+            RecordedRollout(
+                source=spec.source,
+                target=spec.target,
+                instruction=instruction,
+                snapshots=np.stack(snapshots),
+                grasped=grasped,
+                placed=bool(check.placed),
+                final_square=check.final_square,
+                fps=SUBSTEPS_PER_SECOND / frame_substeps,
+            ),
+        )
+
+    if reference is None:
+        joint_l2 = tcp_l2 = np.array([np.nan])
+        expert_xy = np.full(2, np.nan)
+    else:
+        policy_joints = _resample(np.stack(joints), TRAJECTORY_SAMPLES)
+        policy_tcp = _resample(
+            np.stack([executor.tcp_position(q) for q in np.stack(joints)]), TRAJECTORY_SAMPLES
+        )
+        joint_l2 = np.linalg.norm(policy_joints - reference.joint_samples, axis=1)
+        tcp_l2 = np.linalg.norm(policy_tcp - reference.tcp_samples, axis=1)
+        expert_xy = reference.final_piece_xyz[:2]
 
     return RolloutMetrics(
         index=index_label,
+        move=f"{spec.source}->{spec.target}",
         grasped=grasped,
         lifted=lifted,
         placed=bool(check.placed),
         settled=bool(check.settled),
         final_square=check.final_square,
         terminal_to_target_m=float(np.linalg.norm(piece_xyz[:2] - target_xyz[:2])),
-        terminal_to_expert_m=float(np.linalg.norm(piece_xyz[:2] - reference.final_piece_xyz[:2])),
+        terminal_to_expert_m=float(np.linalg.norm(piece_xyz[:2] - expert_xy)),
         joint_disp_mean=float(joint_l2.mean()),
         joint_disp_max=float(joint_l2.max()),
         tcp_disp_mean=float(tcp_l2.mean()),
@@ -346,45 +383,86 @@ def _init_worker(
     revision: str,
     device: str,
     n_action_steps: int | None,
-    source: str,
-    target: str,
+    moves: list[tuple[str, str]],
     episode: int,
     fps: float,
     max_frames: int,
     local_checkpoint: str | None,
+    with_reference: bool,
+    record: Path | None,
 ) -> None:
-    """Load the policy once in this worker process and cache it with the reference trace."""
+    """Load the policy once in this worker process and cache it with the moves it drives."""
     if local_checkpoint is not None:
         policy, pre, post = _load_local(local_checkpoint, device)
     else:
         policy, pre, post = _load_policy(repo_id, revision, device)
     if n_action_steps is not None:
         policy.config.n_action_steps = n_action_steps
-    spec = _spec_for(episode, source, target)
     _WORKER.update(
         policy=policy,
         pre=pre,
         post=post,
-        spec=spec,
+        specs=[_spec_for(episode, source, target) for source, target in moves],
+        references={},
+        with_reference=with_reference,
+        fps=fps,
         max_frames=max_frames,
         frame_substeps=substeps_per_frame(fps),
-        reference=expert_reference(spec, fps),
+        record=record,
     )
 
 
 def _run_index(index_label: int) -> RolloutMetrics:
-    """Run one rollout in a pool worker using the process-cached policy and reference."""
+    """Run one rollout in a pool worker using the process-cached policy.
+
+    Rollout `i` drives move `i` modulo the move list, so every move gets an even share. Each
+    move's expert reference is built the first time this worker drives it.
+    """
     w = _WORKER
+    spec = w["specs"][index_label % len(w["specs"])]
+    reference = None
+    if w["with_reference"]:
+        key = (spec.source, spec.target)
+        if key not in w["references"]:
+            w["references"][key] = expert_reference(spec, w["fps"])
+        reference = w["references"][key]
     return _drive_once(
         w["policy"],
         w["pre"],
         w["post"],
-        w["spec"],
+        spec,
         w["max_frames"],
         w["frame_substeps"],
         index_label,
-        w["reference"],
+        reference,
+        w["record"],
     )
+
+
+def sweep_moves(args: argparse.Namespace) -> list[tuple[str, str]]:
+    """Resolve which moves a sweep drives from its command line.
+
+    Args:
+        args: Parsed options carrying `moves`, `trained_one_step`, `source` and `target`.
+
+    Returns:
+        The (source, target) pairs, in the order rollouts cycle through them.
+
+    Raises:
+        ValueError: If no move is named, or more than one way of naming them is used.
+    """
+    named = [args.moves is not None, args.trained_one_step, args.source is not None]
+    if sum(named) != 1:
+        raise ValueError(
+            "name the moves with exactly one of --source/--target, --moves, --trained-one-step"
+        )
+    if args.moves is not None:
+        return parse_moves(args.moves)
+    if args.trained_one_step:
+        return one_step_moves(EXP2_TRAINED_MOVES)
+    if args.target is None:
+        raise ValueError("--source needs --target")
+    return [(args.source, args.target)]
 
 
 def run_policy_sweep(args: argparse.Namespace) -> dict[str, Any]:
@@ -396,17 +474,19 @@ def run_policy_sweep(args: argparse.Namespace) -> dict[str, Any]:
     """
     import multiprocessing as mp
 
+    moves = sweep_moves(args)
     init = (
         args.repo_id,
         args.revision,
         args.device,
         args.n_action_steps,
-        args.source,
-        args.target,
+        moves,
         args.episode,
         args.fps,
         args.max_frames,
         args.local_checkpoint,
+        not args.no_reference,
+        args.record_states,
     )
     started = time.monotonic()
     records: list[RolloutMetrics] = []
@@ -430,6 +510,8 @@ def run_policy_sweep(args: argparse.Namespace) -> dict[str, Any]:
 
     def summary(values: list[float]) -> dict[str, float]:
         a = np.asarray(values)
+        if np.all(np.isnan(a)):
+            return {"mean": math.nan, "median": math.nan, "p95": math.nan, "max": math.nan}
         return {
             "mean": float(a.mean()),
             "median": float(np.median(a)),
@@ -437,11 +519,25 @@ def run_policy_sweep(args: argparse.Namespace) -> dict[str, Any]:
             "max": float(a.max()),
         }
 
+    per_move: dict[str, dict[str, int]] = {}
+    for r in records:
+        tally = per_move.setdefault(r.move, {"rollouts": 0, "grasped": 0, "lifted": 0, "placed": 0})
+        tally["rollouts"] += 1
+        tally["grasped"] += int(r.grasped)
+        tally["lifted"] += int(r.lifted)
+        tally["placed"] += int(r.placed)
+
     return {
         "mode": "policy_sweep",
-        "move": f"{args.source}->{args.target}",
-        "repo_id": args.repo_id,
-        "revision": args.revision,
+        "move": ",".join(f"{s}->{t}" for s, t in moves),
+        "per_move": per_move,
+        "record_states": None if args.record_states is None else str(args.record_states),
+        # A local checkpoint is loaded instead of the Hub repo, so the repo id and revision would
+        # name a policy that was never scored.
+        "repo_id": None if args.local_checkpoint else args.repo_id,
+        "revision": None if args.local_checkpoint else args.revision,
+        "local_checkpoint": args.local_checkpoint,
+        "engine_version": git_engine_version(),
         "fps": args.fps,
         "n_action_steps": args.n_action_steps,
         "max_frames": args.max_frames,
@@ -540,11 +636,36 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-id", default="hugginggeorge/smolvla-chess-exp2")
     parser.add_argument("--revision", default="020000")
-    parser.add_argument("--source", required=True, help="start square, e.g. d7")
-    parser.add_argument("--target", required=True, help="target square, e.g. d6")
+    parser.add_argument("--source", default=None, help="start square, e.g. d7")
+    parser.add_argument("--target", default=None, help="target square, e.g. d6")
+    parser.add_argument(
+        "--moves",
+        default=None,
+        help="policy sweep over several moves, as source:target pairs (e.g. 'c7:c6,d7:d6'); "
+        "rollouts cycle through them",
+    )
+    parser.add_argument(
+        "--trained-one-step",
+        action="store_true",
+        help="policy sweep over every one-step pawn push the funnel datasets train on",
+    )
+    parser.add_argument(
+        "--no-reference",
+        action="store_true",
+        help="skip the scripted expert reference; displacement metrics are reported as NaN",
+    )
+    parser.add_argument(
+        "--record-states",
+        type=Path,
+        default=None,
+        help="save each rollout's per-frame simulator snapshots under this directory, for "
+        "expert takeovers",
+    )
     parser.add_argument("--episode", type=int, default=0)
     parser.add_argument("--fps", type=float, default=DEFAULT_FPS)
-    parser.add_argument("--max-frames", type=int, default=500)
+    # 25 s at 30 fps. The expert's own episode is ~16-17 s, so a tighter budget scores a policy
+    # that is merely slower than the expert while the piece is still in its hand.
+    parser.add_argument("--max-frames", type=int, default=750)
     parser.add_argument(
         "--n-action-steps",
         type=int,
@@ -573,6 +694,8 @@ def main() -> None:
     )
     parser.add_argument("--out", type=Path, required=True, help="where the JSON report is written")
     args = parser.parse_args()
+    if args.expert_baseline and (args.source is None or args.target is None):
+        parser.error("--expert-baseline needs --source and --target")
 
     report = run_expert_baseline(args) if args.expert_baseline else run_policy_sweep(args)
     args.out.parent.mkdir(parents=True, exist_ok=True)

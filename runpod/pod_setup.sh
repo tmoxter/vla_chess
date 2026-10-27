@@ -2,16 +2,18 @@
 set -euo pipefail
 
 # Pod-side one-shot setup: build a clean Python 3.12 env with CUDA torch and
-# lerobot[smolvla], authenticate `hf`, then launch training in a tmux session.
-# Expects HF_TOKEN in the environment; WANDB_API_KEY is optional.
+# lerobot[smolvla], authenticate `hf`, then launch training in a tmux session — or, with
+# LAUNCH=dagger, a whole DAgger round (runpod/dagger_round.sh from the repo synced to POD_REPO).
+# Needs HF_TOKEN unless training reads a dataset already on disk (DATASET_ROOT) and pushes nothing
+# (HUB_PUSH=false); WANDB_API_KEY is optional.
 
 VENV="${VENV:-/root/vla-venv}"
 CUDA_INDEX="${CUDA_INDEX:-https://download.pytorch.org/whl/cu124}"
 TMUX_SESSION="${TMUX_SESSION:-train}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [[ -z "${HF_TOKEN:-}" ]]; then
-  echo "FATAL: HF_TOKEN must be set (needed for private dataset pull + checkpoint push)." >&2
+if [[ -z "${HF_TOKEN:-}" && ( -z "${DATASET_ROOT:-}" || "${HUB_PUSH:-true}" == "true" ) ]]; then
+  echo "FATAL: HF_TOKEN must be set to pull a private dataset or push checkpoints." >&2
   exit 1
 fi
 
@@ -38,11 +40,28 @@ LEROBOT_VERSION="${LEROBOT_VERSION:-0.6.1}"
 echo ">> install lerobot[smolvla,dataset]==${LEROBOT_VERSION}"
 uv pip install --python "${VENV}/bin/python" "lerobot[smolvla,dataset]==${LEROBOT_VERSION}"
 
-echo ">> hf login (token from env)"
-"${VENV}/bin/hf" auth login --token "${HF_TOKEN}" --add-to-git-credential
+if [[ -n "${HF_TOKEN:-}" ]]; then
+  echo ">> hf login (token from env)"
+  "${VENV}/bin/hf" auth login --token "${HF_TOKEN}" --add-to-git-credential
+fi
+
+if [[ -n "${DATASET_ROOT:-}" && ! -f "${DATASET_ROOT}/meta/info.json" ]]; then
+  echo "FATAL: DATASET_ROOT=${DATASET_ROOT} holds no LeRobot dataset (meta/info.json missing)." >&2
+  exit 1
+fi
 
 echo ">> sanity: import torch + cuda"
 "${VENV}/bin/python" -c "import torch; assert torch.cuda.is_available(), 'no CUDA visible'; print('cuda ok:', torch.cuda.get_device_name(0))"
+
+if [[ "${LAUNCH:-train}" == "dagger" ]]; then
+  POD_REPO="${POD_REPO:-/workspace/vla_chess}"
+  echo ">> launch the DAgger round in tmux session '${TMUX_SESSION}'"
+  tmux new-session -d -s "${TMUX_SESSION}" \
+    "VENV='${VENV}' bash '${POD_REPO}/runpod/dagger_round.sh' 2>&1 | tee /root/dagger.log"
+  echo ">> round started. Attach with:  tmux attach -t ${TMUX_SESSION}"
+  echo ">> tail the log with:           tail -f /root/dagger.log"
+  exit 0
+fi
 
 echo ">> launch training in tmux session '${TMUX_SESSION}'"
 chmod +x "${HERE}/train.sh"
@@ -51,6 +70,8 @@ VENV="${VENV}" tmux new-session -d -s "${TMUX_SESSION}" \
 DATASET_REPO_ID='${DATASET_REPO_ID:-}' POLICY_REPO_ID='${POLICY_REPO_ID:-}' \
 STEPS='${STEPS:-}' SAVE_FREQ='${SAVE_FREQ:-}' BATCH_SIZE='${BATCH_SIZE:-}' \
 JOB_NAME='${JOB_NAME:-}' OUTPUT_DIR='${OUTPUT_DIR:-}' METRICS_DIR='${METRICS_DIR:-}' \
+DATASET_ROOT='${DATASET_ROOT:-}' HUB_PUSH='${HUB_PUSH:-}' RESUME='${RESUME:-}' \
+POLICY_PATH='${POLICY_PATH:-}' \
 bash '${HERE}/train.sh' 2>&1 | tee /root/train.log"
 
 echo ">> training started. Attach with:  tmux attach -t ${TMUX_SESSION}"

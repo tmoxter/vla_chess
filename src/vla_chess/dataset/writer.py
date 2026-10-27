@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import shutil
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
 import numpy as np
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 
 from vla_chess.dataset.episode import Episode
 from vla_chess.sim.scene import ARM_JOINT_NAMES
@@ -187,3 +189,42 @@ class LeRobotWriter:
             return DatasetStats(0, 0)
         self._dataset.finalize()
         return DatasetStats(int(self._dataset.num_episodes), int(self._dataset.num_frames))
+
+
+def merge_datasets(roots: Sequence[Path], out: Path, repo_id: str) -> DatasetStats:
+    """Concatenate finished on-disk datasets into one, episodes in the order given.
+
+    The merged dataset is built in a temporary sibling directory and swapped into `out` only once
+    complete, so a dataset that exists at `out` is always whole.
+
+    Args:
+        roots: Directories of finished datasets that share one schema and frame rate.
+        out: Where the merged dataset goes; replaced if it already exists.
+        repo_id: LeRobot repository id stamped into the merged dataset.
+
+    Returns:
+        The episode and frame counts of the merged dataset.
+
+    Raises:
+        ValueError: If no dataset is given.
+    """
+    from lerobot.datasets.aggregate import aggregate_datasets
+
+    if not roots:
+        raise ValueError("no datasets to merge")
+    staging = out.with_name(out.name + ".tmp")
+    if staging.exists():
+        shutil.rmtree(staging)
+    sources = [LeRobotDatasetMetadata(repo_id, root=root) for root in roots]
+    aggregate_datasets(
+        repo_ids=[source.repo_id for source in sources],
+        aggr_repo_id=repo_id,
+        roots=[Path(root) for root in roots],
+        aggr_root=staging,
+    )
+    merged = LeRobotDatasetMetadata(repo_id, root=staging)
+    stats = DatasetStats(int(merged.total_episodes), int(merged.total_frames))
+    if out.exists():
+        shutil.rmtree(out)
+    staging.rename(out)
+    return stats

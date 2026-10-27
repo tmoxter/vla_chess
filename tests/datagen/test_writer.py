@@ -13,6 +13,7 @@ from vla_chess.dataset.writer import (
     DatasetStats,
     LeRobotWriter,
     episode_features,
+    merge_datasets,
 )
 from vla_chess.sim.scene import PieceType
 
@@ -114,3 +115,44 @@ def test_write_finalize_and_offline_read_round_trips(tmp_path: Path) -> None:
         atol=1e-5,
     )
     assert sample["task"] == "move the pawn from e7 to e6"
+
+
+def _write(root: Path, texts: list[str], first_seed: int) -> list[npt.NDArray[np.float64]]:
+    writer = LeRobotWriter(root, repo_id="vla_chess/test")
+    states = []
+    for offset, text in enumerate(texts):
+        episode, episode_states, _ = make_episode(text, 3 + offset, seed=first_seed + offset)
+        writer.add_episode(episode)
+        states.append(episode_states)
+    writer.finalize()
+    return states
+
+
+def test_merged_datasets_hold_every_episode_in_order(tmp_path: Path) -> None:
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    first = _write(tmp_path / "a", ["move the pawn one field forward"] * 2, first_seed=0)
+    second = _write(tmp_path / "b", ["move the pawn one field forward"], first_seed=10)
+    out = tmp_path / "merged"
+    stats = merge_datasets([tmp_path / "a", tmp_path / "b"], out, repo_id="vla_chess/merged")
+
+    assert stats == DatasetStats(num_episodes=3, num_frames=3 + 4 + 3)
+    back = LeRobotDataset("vla_chess/merged", root=out)
+    assert back.num_episodes == 3
+    # The second source's only episode starts after the first source's 3 + 4 frames.
+    np.testing.assert_allclose(
+        np.asarray(back[7]["observation.state"], dtype=np.float32),
+        second[0][0].astype(np.float32),
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(
+        np.asarray(back[3]["observation.state"], dtype=np.float32),
+        first[1][0].astype(np.float32),
+        atol=1e-5,
+    )
+    assert not (tmp_path / "merged.tmp").exists()
+
+
+def test_merging_nothing_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="no datasets"):
+        merge_datasets([], tmp_path / "merged", repo_id="vla_chess/merged")
