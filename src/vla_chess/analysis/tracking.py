@@ -169,3 +169,27 @@ def funnel_metrics(
     for reason, count in rejects.items():
         metrics[f"{prefix}/rejects/{reason}"] = float(count)
     return metrics
+
+
+def takeover_metrics(manifest: Mapping[str, Any], prefix: str = "takeovers") -> dict[str, float]:
+    """Pull the tallies out of a DAgger round's takeover manifest.
+
+    Args:
+        manifest: The manifest as loaded from its JSON file.
+        prefix: Metric name prefix.
+
+    Returns:
+        Rollouts, frames tried and takeovers kept, then the frames tried and the takeovers kept
+        per situation, and the count of each reject reason.
+    """
+    metrics = {
+        f"{prefix}/{key}": float(manifest[key]) for key in ("rollouts", "frames_tried", "kept")
+    }
+    for group, name in (
+        ("situations", "tried"),
+        ("kept_by_situation", "kept"),
+        ("rejects", "rejects"),
+    ):
+        for key, count in manifest[group].items():
+            metrics[f"{prefix}/{name}/{key}"] = float(count)
+    return metrics

@@ -28,6 +28,7 @@ from vla_chess.analysis.tracking import (
     funnel_metrics,
     parse_train_log,
     policy_sweep_metrics,
+    takeover_metrics,
 )
 
 DEFAULT_TRACKING_URI = "sqlite:///mlflow/mlflow.db"
@@ -89,6 +90,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--funnel", type=Path, nargs="+", default=[], help="funnel manifests of one generation"
     )
+    parser.add_argument(
+        "--takeovers", type=Path, default=None, help="takeover manifest of a DAgger round"
+    )
     parser.add_argument("--param", type=_pair, action="append", default=[], help="key=value")
     parser.add_argument("--tag", type=_pair, action="append", default=[], help="key=value")
     parser.add_argument(
@@ -139,6 +143,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.funnel:
             mlflow.log_metrics(funnel_metrics([_load(path) for path in args.funnel]))
             attachments.extend(args.funnel)
+        if args.takeovers is not None:
+            mlflow.log_metrics(takeover_metrics(_load(args.takeovers)))
+            attachments.append(args.takeovers)
 
         for path in attachments:
             mlflow.log_artifact(str(path))

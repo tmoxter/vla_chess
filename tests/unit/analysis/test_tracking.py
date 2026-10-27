@@ -8,6 +8,7 @@ from vla_chess.analysis.tracking import (
     funnel_metrics,
     parse_train_log,
     policy_sweep_metrics,
+    takeover_metrics,
 )
 
 LOG = (
@@ -117,3 +118,23 @@ def test_shard_manifests_total_to_one_yield() -> None:
 def test_manifests_from_different_pools_are_refused() -> None:
     with pytest.raises(ValueError, match="different pools"):
         funnel_metrics([{"slots": 120, "kept": 1}, {"slots": 60, "kept": 1}])
+
+
+def test_a_takeover_manifest_yields_its_tallies() -> None:
+    manifest = {
+        "rollouts": 2,
+        "frames_tried": 5,
+        "kept": 2,
+        "situations": {"unrecoverable": 3, "to_grasp": 2},
+        "kept_by_situation": {"to_grasp": 2},
+        "rejects": {"direct_not_near": 2},
+    }
+    assert takeover_metrics(manifest) == {
+        "takeovers/rollouts": 2.0,
+        "takeovers/frames_tried": 5.0,
+        "takeovers/kept": 2.0,
+        "takeovers/tried/unrecoverable": 3.0,
+        "takeovers/tried/to_grasp": 2.0,
+        "takeovers/kept/to_grasp": 2.0,
+        "takeovers/rejects/direct_not_near": 2.0,
+    }
