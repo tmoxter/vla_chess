@@ -242,7 +242,11 @@ class VerticalGraspSolver:
         return np.concatenate([position, weight * (self.approach_axis() - self._down)])
 
     def _refine(
-        self, seed: npt.NDArray[np.float64], target: npt.NDArray[np.float64], weight: float
+        self,
+        seed: npt.NDArray[np.float64],
+        target: npt.NDArray[np.float64],
+        weight: float,
+        roll_hold: float = 0.0,
     ) -> npt.NDArray[np.float64]:
         """Descend from one seed to the nearest configuration that grips `target` from above.
 
@@ -254,20 +258,31 @@ class VerticalGraspSolver:
             seed: Arm configuration to start from, in `ARM_JOINT_NAMES` order.
             target: World point the TCP should sit at, metres.
             weight: How hard the approach-axis error counts against the position error.
+            roll_hold: How hard turning the roll joint away from the seed counts, per radian,
+                against the position error in metres. Zero leaves the roll free.
 
         Returns:
             The configuration converged on, which meets no tolerance in particular — how close
             it lands is for the caller to measure.
         """
         qpos = np.clip(seed, self._lo, self._hi)
+        anchor = float(qpos[_ROLL])
+
+        def residual_at(candidate: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+            """Residual of one configuration, with the roll-hold row when it is in force."""
+            residual = self._residual(candidate, target, weight)
+            if roll_hold == 0.0:
+                return residual
+            return np.append(residual, roll_hold * (float(candidate[_ROLL]) - anchor))
+
         previous = np.inf
         for _ in range(_IK_ITERATIONS):
-            residual = self._residual(qpos, target, weight)
-            jacobian = np.empty((6, 5))
+            residual = residual_at(qpos)
+            jacobian = np.empty((residual.size, 5))
             for k in range(5):
                 nudge = np.zeros(5)
                 nudge[k] = _FD_EPS
-                shifted = self._residual(np.clip(qpos + nudge, self._lo, self._hi), target, weight)
+                shifted = residual_at(np.clip(qpos + nudge, self._lo, self._hi))
                 jacobian[:, k] = (shifted - residual) / _FD_EPS
             step = np.linalg.lstsq(
                 jacobian.T @ jacobian + _IK_DAMPING * np.eye(5), -jacobian.T @ residual, rcond=None
@@ -276,7 +291,7 @@ class VerticalGraspSolver:
             if norm > _IK_MAX_STEP:
                 step *= _IK_MAX_STEP / norm
             qpos = np.clip(qpos + step, self._lo, self._hi)
-            current = float(np.linalg.norm(self._residual(qpos, target, weight)))
+            current = float(np.linalg.norm(residual_at(qpos)))
             if current < _FD_EPS or abs(previous - current) < 1e-9:
                 break
             previous = current
@@ -488,6 +503,7 @@ class VerticalGraspSolver:
         target: npt.NDArray[np.float64],
         seed: npt.NDArray[np.float64],
         weight: float = 1.0,
+        roll_hold: float = 0.0,
     ) -> tuple[npt.NDArray[np.float64], float, float]:
         """Refine one fingers-down configuration from `seed`, with no restarts.
 
@@ -498,12 +514,17 @@ class VerticalGraspSolver:
             target: World point the TCP should sit at, metres.
             seed: Arm configuration to start from, in `ARM_JOINT_NAMES` order.
             weight: How hard the approach-axis error counts against the position error.
+            roll_hold: How hard turning the roll joint away from the seed counts, per radian,
+                against the position error in metres. Where the residual barely depends on the
+                roll, as with `wrist_flex` on its stop, its optimum can swing by radians between
+                neighbouring targets; holding it keeps a tracked roll continuous. Zero leaves
+                the roll free.
 
         Returns:
             The refined configuration, its TCP error in metres, and its approach angle off
             vertical in degrees.
         """
-        qpos = self._refine(np.asarray(seed, dtype=np.float64), target, weight)
+        qpos = self._refine(np.asarray(seed, dtype=np.float64), target, weight, roll_hold)
         error, angle = self.measure(qpos, target)
         return qpos, error, angle
 

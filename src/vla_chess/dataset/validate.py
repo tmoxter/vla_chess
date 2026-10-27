@@ -25,6 +25,7 @@ class RejectReason(Enum):
     IK_DIVERGED = "ik_diverged"
     PIECE_DISTURBED = "piece_disturbed"
     TIMEOUT = "timeout"
+    STALLED = "stalled"
     NOT_GRASPED = "not_grasped"
     WRONG_SQUARE = "wrong_square"
     NOT_SETTLED = "not_settled"
@@ -36,6 +37,7 @@ _ABORT_REASONS: dict[AbortReason, RejectReason] = {
     AbortReason.IK_DIVERGED: RejectReason.IK_DIVERGED,
     AbortReason.PIECE_DISTURBED: RejectReason.PIECE_DISTURBED,
     AbortReason.TIMEOUT: RejectReason.TIMEOUT,
+    AbortReason.STALLED: RejectReason.STALLED,
 }
 
 

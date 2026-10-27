@@ -1,9 +1,11 @@
-"""The DART action-noise process: its scale, its correlation, and where it is gated off."""
+"""The DART action-noise process: its scale, its correlation, its schedule, and its recovery."""
+
+import itertools
 
 import numpy as np
 import pytest
 
-from vla_chess.control.executor import DART_PHASE_GAINS, ActionNoise
+from vla_chess.control.executor import DART_PHASE_GAINS, ActionNoise, ProgressGate
 from vla_chess.control.planner import Phase
 
 
@@ -25,17 +27,22 @@ def test_offset_is_correlated_from_one_step_to_the_next() -> None:
     assert lag1 == pytest.approx(np.exp(-1.0 / 15.0), abs=0.02)
 
 
-@pytest.mark.parametrize("phase", [Phase.DESCEND, Phase.GRASP, Phase.PLACE, Phase.RELEASE])
-def test_precision_phases_run_clean(phase: Phase) -> None:
+@pytest.mark.parametrize("phase", list(Phase))
+def test_every_phase_is_perturbed(phase: Phase) -> None:
     noise = _noise()
-    assert not np.any(noise.sample(phase, 0.5))
+    assert np.any(noise.sample(phase, 0.5))
 
 
-def test_gain_fades_to_zero_by_the_end_of_the_approach() -> None:
-    assert DART_PHASE_GAINS[Phase.APPROACH][1] == 0.0
+def test_adjacent_phases_meet_at_nearly_the_same_gain() -> None:
+    for before, after in itertools.pairwise(Phase):
+        assert DART_PHASE_GAINS[before][1] == pytest.approx(DART_PHASE_GAINS[after][0], abs=0.05)
+
+
+def test_a_recovering_step_relaxes_the_offset_without_a_kick() -> None:
     noise = _noise()
-    assert not np.any(noise.sample(Phase.APPROACH, 1.0))
-    assert np.any(noise.sample(Phase.APPROACH, 0.0))
+    previous = noise.sample(Phase.SURVEY_START, 0.0)
+    relaxed = noise.sample(Phase.SURVEY_START, 0.0, recovering=True)
+    assert np.allclose(relaxed, np.exp(-1.0 / (0.1 * 50.0)) * previous)
 
 
 def test_same_seed_reproduces_the_same_draws() -> None:
@@ -47,3 +54,15 @@ def test_same_seed_reproduces_the_same_draws() -> None:
 def test_rejects_a_non_positive_time_constant() -> None:
     with pytest.raises(ValueError):
         ActionNoise(0.05, 0.0, control_hz=50.0, rng=np.random.default_rng(0))
+
+
+def test_rejects_a_non_positive_recovery_time_constant() -> None:
+    with pytest.raises(ValueError):
+        ActionNoise(0.05, 0.3, 50.0, np.random.default_rng(0), recovery_tau=0.0)
+
+
+def test_gate_judges_the_board_plane_and_the_vertical_separately() -> None:
+    gate = ProgressGate(lateral=0.002, vertical=0.005)
+    assert gate.admits(np.array([0.001, 0.001, 0.004]))
+    assert not gate.admits(np.array([0.002, 0.002, 0.0]))
+    assert not gate.admits(np.array([0.0, 0.0, 0.006]))

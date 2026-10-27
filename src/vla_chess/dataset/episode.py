@@ -13,6 +13,7 @@ import numpy as np
 
 from vla_chess.control.executor import (
     CONTROL_HZ,
+    PROGRESS_GATES,
     TILTED_IK_ABORT,
     ActionNoise,
     ExecutionResult,
@@ -172,15 +173,21 @@ def move_scene_description(
 class DartKnobs:
     """How the kept episode's executed actions are perturbed (DART), when they are at all.
 
-    The noise is an `ActionNoise` process on the arm joints; the recorded labels stay the clean
-    expert commands. A noisy rollout can knock the grasp loose, and the time-indexed expert has no
-    way to re-grasp, so a draw only counts if the move still succeeds — up to `retries` draws are
-    tried before the slot is logged as a miss rather than falling back to a clean demonstration.
+    The noise is an `ActionNoise` process on the arm joints, applied on every leg at the gains of
+    `DART_PHASE_GAINS`; the recorded labels stay the clean expert commands. With `gated`, the
+    expert runs under `PROGRESS_GATES`: it holds each leg, jaws included, until the arm is back
+    within tolerance of its command. A noisy rollout can still knock the piece loose, and the
+    expert has no way to re-grasp, so a draw only counts if the move succeeds — up to `retries`
+    draws are tried before the slot is logged as a miss rather than falling back to a clean
+    demonstration.
     """
 
     sigma: float
-    tau: float = 0.3
+    # Seconds. At 0.3 s the per-step kicks shook a held pawn loose in a third of the draws; at
+    # 1.5 s the drift is as large and the grip survives (runpod/dart_probe.py).
+    tau: float = 1.5
     retries: int = 8
+    gated: bool = True
 
 
 class EpisodeRunner:
@@ -297,7 +304,8 @@ class EpisodeRunner:
             selection: Whether to keep the first accepted candidate or one drawn at random.
             dart: When set, the kept plan is recorded under injected action noise: draws are
                 dry-run (unrendered) until one still completes the move, and that same seeded
-                draw is then re-run with the cameras attached. None records it clean.
+                draw is then re-run with the cameras attached, under the same gates. None
+                records it clean and ungated.
 
         Returns:
             The outcome: the recorded episode when a candidate placed the piece (None otherwise),
@@ -345,6 +353,7 @@ class EpisodeRunner:
             rng = np.random.default_rng([base_seed, draw])
             return ActionNoise(dart.sigma, dart.tau, self._control_hz, rng)
 
+        gates = PROGRESS_GATES if dart is not None and dart.gated else None
         draw = 0
         if dart is not None:
             for draw in range(dart.retries):
@@ -353,6 +362,7 @@ class EpisodeRunner:
                     kept,
                     ik_abort=TILTED_IK_ABORT,
                     action_noise=noise_for(draw),
+                    gates=gates,
                 )
                 if trial.succeeded:
                     break
@@ -368,6 +378,7 @@ class EpisodeRunner:
                 on_control_step=recorder.on_control_step,
                 ik_abort=TILTED_IK_ABORT,
                 action_noise=noise_for(draw),
+                gates=gates,
             )
             frames = recorder.frames(result)
         if dart is not None and not result.succeeded:

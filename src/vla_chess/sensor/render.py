@@ -1,4 +1,4 @@
-"""Offscreen rendering of a fixed camera set, and the osmesa contexts it holds open."""
+"""Offscreen rendering of a fixed camera set, and the GL contexts it holds open."""
 
 import math
 import os
@@ -10,22 +10,23 @@ import mujoco
 import numpy as np
 import numpy.typing as npt
 
-# Offscreen backends we support: 'osmesa' is CPU software rendering (no GPU/display needed, the
-# local box); 'egl' is headless GPU rendering (a rented GPU pod), 100-1000x faster for datagen.
-# 'glfw' still can't work headless. osmesa stays the default so local behaviour is unchanged.
-SUPPORTED_GL_BACKENDS: Final = ("osmesa", "egl")
+# Offscreen backends we support: 'osmesa' is CPU software rendering (a Linux host with no GPU or
+# display); 'egl' is headless GPU rendering on Linux (a rented GPU pod), 100-1000x faster for
+# datagen; 'cgl' is headless GPU rendering on macOS. 'glfw' can't work headless.
+SUPPORTED_GL_BACKENDS: Final = ("osmesa", "egl", "cgl")
 DEFAULT_GL_BACKEND: Final = "osmesa"
 
 RgbFrame = npt.NDArray[np.uint8]
 
 _BACKEND_HELP: Final = (
-    "Set MUJOCO_GL=osmesa for CPU software rendering (no GPU/display, e.g. this box) or "
-    "MUJOCO_GL=egl for headless GPU rendering (a GPU pod), before importing vla_chess.render."
+    "Set MUJOCO_GL=osmesa for CPU software rendering (Linux, no GPU/display), MUJOCO_GL=egl for "
+    "headless GPU rendering on Linux, or MUJOCO_GL=cgl for headless GPU rendering on macOS, "
+    "before importing vla_chess.render."
 )
 
 
 def check_gl_backend() -> None:
-    """Raise unless MUJOCO_GL selects a supported offscreen backend (osmesa or egl).
+    """Raise unless MUJOCO_GL selects a supported offscreen backend (osmesa, egl or cgl).
 
     Raises:
         RuntimeError: If the variable is unset or names an unsupported backend.
@@ -125,7 +126,7 @@ class _ResolvedCamera:
 class Renderer:
     """Renders a fixed set of cameras from one MuJoCo model into reused uint8 buffers.
 
-    One `mujoco.Renderer` (and therefore one osmesa context) is created per distinct
+    One `mujoco.Renderer` (and therefore one GL context) is created per distinct
     resolution and shared by the cameras that use it.
     """
 
@@ -143,7 +144,7 @@ class Renderer:
         Raises:
             ValueError: If no camera is given, if two share an output name, or if any spec
                 names a camera the model does not have.
-            RuntimeError: If the GL backend in force is not osmesa.
+            RuntimeError: If the GL backend in force is not a supported one.
         """
         check_gl_backend()
         _check_resolved_backend()

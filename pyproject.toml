@@ -14,18 +14,25 @@ packages = ["src/vla_chess"]
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
-platforms = ["linux-64"]
+platforms = ["linux-64", "osx-arm64"]
 
-[tool.pixi.activation.env]
+# Offscreen GL per platform: osmesa (CPU software rendering) on Linux hosts without a display,
+# CGL (the GPU, headless) on macOS. A GPU pod overrides this with MUJOCO_GL=egl in its scripts.
+[tool.pixi.target.linux-64.activation.env]
 MUJOCO_GL = "osmesa"
 PYOPENGL_PLATFORM = "osmesa"
+
+[tool.pixi.target.osx-arm64.activation.env]
+MUJOCO_GL = "cgl"
 
 [tool.pixi.dependencies]
 python = ">=3.11,<3.13"
 mujoco = ">=3.2"
-mesalib = "24.*"
 numpy = ">=1.26"
 ffmpeg = ">=6.0"
+
+[tool.pixi.target.linux-64.dependencies]
+mesalib = "24.*"
 
 [tool.pixi.pypi-dependencies]
 mink = ">=0.0.4"
@@ -50,6 +57,12 @@ numpy = ">=1.26,<2.3"
 packaging = ">=24.2,<26"
 fsspec = ">=2023.1.0,<=2026.2.0"
 
+# torch's macOS wheel bundles its own libomp, and conda-forge's osx-arm64 OpenBLAS defaults to
+# the OpenMP build: two OpenMP runtimes in one process abort at torch import. The pthreads build
+# is also the variant linux-64 resolves to.
+[tool.pixi.feature.datagen.target.osx-arm64.dependencies]
+libopenblas = { version = "*", build = "pthreads*" }
+
 [tool.pixi.feature.datagen.pypi-dependencies]
 lerobot = { version = "==0.6.1", extras = ["dataset"] }
 torch = { version = "==2.11.0", index = "https://download.pytorch.org/whl/cpu" }
@@ -64,6 +77,9 @@ torchcodec = { version = "==0.11.1", index = "https://download.pytorch.org/whl/c
 numpy = ">=1.26,<2.3"
 packaging = ">=24.2,<26"
 fsspec = ">=2023.1.0,<=2026.2.0"
+
+[tool.pixi.feature.eval.target.osx-arm64.dependencies]
+libopenblas = { version = "*", build = "pthreads*" }
 
 [tool.pixi.feature.eval.pypi-dependencies]
 lerobot = { version = "==0.6.1", extras = ["dataset", "smolvla"] }

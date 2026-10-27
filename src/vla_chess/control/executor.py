@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Final
@@ -48,6 +48,15 @@ MAX_BYSTANDER_DRIFT: Final = 0.005
 # solver's own default, which the vertical grasps are exact at.
 TILT_TRACK_WEIGHT: Final = 0.3
 
+# How hard the leg tracker resists turning the wrist roll away from the previous command, per
+# radian against metres of TCP error. Without it the roll's optimum swings by radians within a few
+# control steps wherever wrist_flex sits on its stop: over the 20 trained one-step moves the clean
+# expert commanded up to 60 rad/s against an actuator that tracks about 5.5 rad/s, and its roll
+# state trailed the command by 1.4 rad (median of per-episode maxima). At 0.03 the command peaks
+# at 2.6 rad/s, the roll trails by under 0.01 rad, the worst IK error is unchanged, and 93% of
+# sampled candidates validate against 86% unheld; 0.1 holds no tighter and validates fewer.
+ROLL_HOLD: Final = 0.03
+
 # A stuck or diverging rollout has to end by itself rather than run until someone notices. The
 # budget is the executor's own work: capturing observations happens inside this loop through
 # `on_control_step`, and rendering two cameras instead of one is the caller's cost, not a sim
@@ -62,6 +71,7 @@ class AbortReason(Enum):
     IK_DIVERGED = "ik_diverged"
     PIECE_DISTURBED = "piece_disturbed"
     TIMEOUT = "timeout"
+    STALLED = "stalled"
 
 
 @dataclass(frozen=True)
@@ -114,21 +124,80 @@ class ExecutionResult:
         return self.abort_reason is None and self.grasped and self.placed
 
 
-# Where DART noise is applied along a pick-and-place, as (gain at leg start, gain at leg end),
-# linearly interpolated across the leg; phases not listed get none. The grasp close and the place
-# need millimetre precision and the time-indexed expert cannot re-grasp, so the noise is only on
-# while the arm is high: it fades out across the approach and across the transport, and the
-# descent onto the pawn, the close, the set-down and the release all run clean. The arm is pushed
-# off the expert's path where the policy drifts and the clean labels have pulled it back before
-# precision matters. Measured over the 20 Exp-1 moves (runpod/dart_probe.py): ungated noise of only
-# ~7 mm mean TCP drift dropped the expert to 4% success; fading across the descent instead still
-# let the fingers knock the pawn (38% at 0.04 rad); this schedule grasps 100% and places 85% at
-# 0.06 rad with up to ~3.4 cm of drift per episode.
+@dataclass(frozen=True)
+class ProgressGate:
+    """How far the arm may trail its command before a leg stops advancing.
+
+    Measured between the TCP of the arm as it stands and the TCP of the command last written,
+    split into the board plane and the vertical: contact with the board holds the hand up by a
+    few millimetres during a set-down, which says nothing about whether it is over the square.
+    """
+
+    lateral: float  # metres, in the board plane
+    vertical: float  # metres
+
+    def admits(self, offset: npt.NDArray[np.float64]) -> bool:
+        """Report whether a TCP offset is close enough for the leg to advance.
+
+        Args:
+            offset: Realized TCP minus commanded TCP, world frame, metres.
+
+        Returns:
+            True when both the planar and the vertical part are within tolerance.
+        """
+        return (
+            float(np.linalg.norm(offset[:2])) <= self.lateral
+            and abs(float(offset[2])) <= self.vertical
+        )
+
+
+# Where an expert under action noise waits for the arm before advancing a leg. A leg's clock, and
+# with it the jaw command interpolated along that leg, only moves on while the realized TCP is
+# within the gate of the commanded one; otherwise the command is held, so the recorded label points
+# back at where the arm should be and the jaws neither close on, nor open over, the wrong spot.
+# Clean tracking on the 20 Exp-1 moves stays under 1.8 mm laterally on every leg and under 1.3 mm
+# vertically except where the hand or the piece bears on the board (place, release, retreat: up to
+# 4.6 mm), so the precision gates sit just above that and leave every clean run bit-identical. The
+# transits and hover-height legs only need to stay near the path, so their gate stops a runaway.
+PROGRESS_GATES: Final[dict[Phase, ProgressGate]] = {
+    Phase.SURVEY_START: ProgressGate(lateral=0.030, vertical=0.030),
+    Phase.APPROACH: ProgressGate(lateral=0.030, vertical=0.030),
+    Phase.DESCEND: ProgressGate(lateral=0.0025, vertical=0.004),
+    Phase.GRASP: ProgressGate(lateral=0.0025, vertical=0.003),
+    Phase.LIFT: ProgressGate(lateral=0.030, vertical=0.030),
+    Phase.TRANSPORT: ProgressGate(lateral=0.030, vertical=0.030),
+    Phase.PLACE: ProgressGate(lateral=0.0025, vertical=0.006),
+    Phase.RELEASE: ProgressGate(lateral=0.0025, vertical=0.006),
+    Phase.RETREAT: ProgressGate(lateral=0.030, vertical=0.030),
+    Phase.SURVEY_END: ProgressGate(lateral=0.030, vertical=0.030),
+}
+
+# How long a gated leg may spend holding its command, on top of its own duration, before the run
+# is aborted as stalled.
+MAX_GATE_WAIT: Final = 3.0
+
+# DART noise gain per phase, as (gain at leg start, gain at leg end), linearly interpolated across
+# the leg; phases not listed get none. Every leg is perturbed, and adjacent legs meet at nearly the
+# same gain so no boundary jerks the arm. The transits and the hover-height legs run at full scale.
+# Wherever the fingers are within millimetres of a piece the gain is cut, not removed: the jaws
+# clear the stem by 5 mm, and full-scale drift there knocks the pawn over rather than producing a
+# state anyone could recover from. The retreat stays low because it starts with the fingers beside
+# the piece just set down; at full gain it tipped the pawn in most draws.
+# Measured over the 20 Exp-1 moves, 5 draws each, at sigma 0.06 rad and tau 1.5 s
+# (runpod/dart_probe.py): the expert succeeds in 97/100 draws, its mean / max TCP offset from the
+# commanded path is ~2 / 3-5 mm on descend, grasp, place and release and ~11-17 / 22-27 mm on the
+# transits, and the gates add ~0.3 s per episode.
 DART_PHASE_GAINS: Final[dict[Phase, tuple[float, float]]] = {
     Phase.SURVEY_START: (1.0, 1.0),
-    Phase.APPROACH: (1.0, 0.0),
-    Phase.LIFT: (0.0, 1.0),
-    Phase.TRANSPORT: (1.0, 0.0),
+    Phase.APPROACH: (1.0, 0.15),
+    Phase.DESCEND: (0.1, 0.1),
+    Phase.GRASP: (0.1, 0.1),
+    Phase.LIFT: (0.15, 1.0),
+    Phase.TRANSPORT: (1.0, 0.15),
+    Phase.PLACE: (0.15, 0.15),
+    Phase.RELEASE: (0.15, 0.15),
+    Phase.RETREAT: (0.1, 0.1),
+    Phase.SURVEY_END: (0.1, 1.0),
 }
 
 
@@ -138,10 +207,17 @@ class ActionNoise:
     An Ornstein-Uhlenbeck process per arm joint: each control step it relaxes toward zero with
     time constant `tau` and is kicked by Gaussian noise scaled so its stationary standard deviation
     is `sigma`. Correlated rather than white because the position actuators low-pass a fresh
-    per-step draw into nearly nothing; a drift that persists for a fraction of a second actually
-    moves the arm off the expert's path, which is the point of the injection. The gripper is left
+    per-step draw into nearly nothing; a drift that persists actually moves the arm off the
+    expert's path, which is the point of the injection. The slower the drift for a given `sigma`,
+    the gentler the accelerations a held piece is shaken with. The gripper is left
     clean so the noise perturbs where the jaws go, not whether they close. The process runs every
     step; `DART_PHASE_GAINS` scales what reaches the actuators by phase.
+
+    On a position-controlled arm with absolute targets the arm's deviation *is* the injected
+    offset, so no expert label can pull the arm back while the offset persists. A step sampled as
+    `recovering` therefore draws no kick and relaxes the offset with the shorter `recovery_tau`:
+    the expert holds its command while the arm is off its gate, the perturbation lets go, and the
+    arm returns under the expert's label before the leg moves on.
     """
 
     def __init__(
@@ -151,6 +227,7 @@ class ActionNoise:
         control_hz: float,
         rng: np.random.Generator,
         gains: dict[Phase, tuple[float, float]] = DART_PHASE_GAINS,
+        recovery_tau: float = 0.1,
     ) -> None:
         """Set the noise scale and correlation.
 
@@ -160,31 +237,42 @@ class ActionNoise:
             control_hz: Rate `sample` is called at, which sets the per-step decay.
             rng: Source of the Gaussian kicks; seeded by the caller so a run is reproducible.
             gains: Per-phase (start, end) gain on the offset; `DART_PHASE_GAINS` by default.
+            recovery_tau: Time constant the offset relaxes with on a recovering step, seconds.
 
         Raises:
-            ValueError: If sigma is negative or tau is not positive.
+            ValueError: If sigma is negative, or tau or recovery_tau is not positive.
         """
-        if sigma < 0.0 or tau <= 0.0:
-            raise ValueError(f"need sigma >= 0 and tau > 0, got sigma={sigma}, tau={tau}")
+        if sigma < 0.0 or tau <= 0.0 or recovery_tau <= 0.0:
+            raise ValueError(
+                f"need sigma >= 0 and tau, recovery_tau > 0, got sigma={sigma}, tau={tau}, "
+                f"recovery_tau={recovery_tau}"
+            )
         self._decay = float(np.exp(-1.0 / (tau * control_hz)))
+        self._recovery_decay = float(np.exp(-1.0 / (recovery_tau * control_hz)))
         self._kick = sigma * float(np.sqrt(1.0 - self._decay**2))
         self._rng = rng
         self._gains = gains
         self._value = rng.normal(0.0, sigma, size=len(ARM_JOINT_NAMES))
 
-    def sample(self, phase: Phase, progress: float) -> npt.NDArray[np.float64]:
+    def sample(
+        self, phase: Phase, progress: float, recovering: bool = False
+    ) -> npt.NDArray[np.float64]:
         """Advance the process one control step and return the gated offset, radians.
 
         Args:
             phase: The phase of the leg being flown.
             progress: How far through that leg this step is, from 0 to 1.
+            recovering: Relax the offset toward zero this step instead of kicking it.
 
         Returns:
             The offset to add to the arm command this step.
         """
-        self._value = self._decay * self._value + self._kick * self._rng.normal(
-            size=len(ARM_JOINT_NAMES)
-        )
+        if recovering:
+            self._value = self._recovery_decay * self._value
+        else:
+            self._value = self._decay * self._value + self._kick * self._rng.normal(
+                size=len(ARM_JOINT_NAMES)
+            )
         start, end = self._gains.get(phase, (0.0, 0.0))
         return (start + progress * (end - start)) * self._value
 
@@ -336,6 +424,66 @@ class Executor:
             gripper, self._index.gripper_joint_range
         )
 
+    def _tcp_offset(
+        self, data: mujoco.MjData, command: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
+        """Measure how far the arm's TCP sits from where a command would put it.
+
+        Args:
+            data: Stepped state to read the arm configuration from.
+            command: Commanded arm configuration, in `ARM_JOINT_NAMES` order.
+
+        Returns:
+            Realized TCP minus commanded TCP, world frame, metres.
+        """
+        return self.tcp_position(self._arm_qpos(data)) - self.tcp_position(command)
+
+    def _leg_command(
+        self,
+        alpha: float,
+        arm: npt.NDArray[np.float64],
+        start_arm: npt.NDArray[np.float64],
+        target_arm: npt.NDArray[np.float64] | None,
+        start_tcp: npt.NDArray[np.float64],
+        target_tcp: npt.NDArray[np.float64] | None,
+        start_axis: npt.NDArray[np.float64],
+        target_axis: npt.NDArray[np.float64] | None,
+    ) -> tuple[npt.NDArray[np.float64], float | None]:
+        """Solve the arm command at one point along a leg.
+
+        A Cartesian leg eases the TCP from `start_tcp` to `target_tcp` and tracks it with IK
+        seeded from the previous command; a joint-space leg eases the configuration itself.
+
+        Args:
+            alpha: How far through the leg, from 0 to 1, before easing.
+            arm: The previous command, used as the IK seed.
+            start_arm: Configuration the leg started from.
+            target_arm: The leg's joint-space target, or None for a Cartesian leg.
+            start_tcp: TCP position the leg started from, metres.
+            target_tcp: The leg's TCP target, metres, or None for a joint-space leg.
+            start_axis: Finger direction the leg started from, world frame.
+            target_axis: Finger direction to ease toward on a tilted leg; None flies the leg
+                fingers-down.
+
+        Returns:
+            The arm command, and the IK residual in metres for a Cartesian leg (None for a
+            joint-space one).
+        """
+        blend = minimum_jerk(alpha)
+        if target_tcp is None:
+            assert target_arm is not None
+            return start_arm + blend * (target_arm - start_arm), None
+        point = start_tcp + blend * (target_tcp - start_tcp)
+        if target_axis is not None:
+            eased = start_axis + blend * (target_axis - start_axis)
+            self._solver._down = eased / float(np.linalg.norm(eased))
+            weight = TILT_TRACK_WEIGHT
+        else:
+            self._solver._down = self._default_down
+            weight = 1.0
+        solved, error, _ = self._solver.track(point, arm, weight=weight, roll_hold=ROLL_HOLD)
+        return solved, error
+
     def _holding(self, data: mujoco.MjData, piece_body: int) -> bool:
         """Report whether both jaws are currently bearing on the piece being moved.
 
@@ -360,6 +508,7 @@ class Executor:
         wall_clock_limit: float = WALL_CLOCK_LIMIT,
         ik_abort: float = MAX_IK_ERROR,
         action_noise: ActionNoise | None = None,
+        gates: Mapping[Phase, ProgressGate] | None = None,
     ) -> ExecutionResult:
         """Execute a plan, recording one state/action pair per control step.
 
@@ -384,6 +533,11 @@ class Executor:
                 command. The plan's targets are absolute, so the next clean command already
                 points back toward the expert's path from wherever the noise left the arm, and
                 that is what gets recorded against the perturbed state.
+            gates: Per-phase `ProgressGate`, normally `PROGRESS_GATES`. When set, a leg advances
+                only on steps where the realized TCP is within its phase's gate of the last
+                command, and otherwise re-sends that command, jaws included; a leg that waits
+                more than `MAX_GATE_WAIT` beyond its duration aborts the run as stalled. None
+                advances every leg on the clock, whatever the arm did.
 
         Returns:
             The rollout: its states and actions, the phase each step belonged to, whether the
@@ -438,31 +592,38 @@ class Executor:
                 np.array(waypoint.qpos, dtype=np.float64) if waypoint.qpos is not None else None
             )
 
-            for leg in range(1, legs + 1):
-                blend = minimum_jerk(leg / legs)
-                if target_tcp is not None:
-                    point = start_tcp + blend * (target_tcp - start_tcp)
-                    if target_axis is not None:
-                        eased = start_axis + blend * (target_axis - start_axis)
-                        self._solver._down = eased / float(np.linalg.norm(eased))
-                        weight = TILT_TRACK_WEIGHT
-                    else:
-                        self._solver._down = self._default_down
-                        weight = 1.0
-                    solved, error, _ = self._solver.track(point, arm, weight=weight)
-                    max_ik = max(max_ik, error)
-                    if error > ik_abort:
-                        abort = AbortReason.IK_DIVERGED
-                    arm = solved
-                else:
-                    assert target_arm is not None
-                    arm = start_arm + blend * (target_arm - start_arm)
-                gripper = start_gripper + (leg / legs) * (waypoint.gripper - start_gripper)
+            gate = None if gates is None else gates.get(waypoint.phase)
+            step_budget = legs + round(MAX_GATE_WAIT * self._control_hz)
+            leg = 0
+            leg_steps = 0
+            while leg < legs:
+                leg_steps += 1
+                if leg_steps > step_budget:
+                    abort = AbortReason.STALLED
+                    break
+                holding = gate is not None and not gate.admits(self._tcp_offset(data, arm))
+                if not holding:
+                    leg += 1
+                    arm, error = self._leg_command(
+                        leg / legs,
+                        arm,
+                        start_arm,
+                        target_arm,
+                        start_tcp,
+                        target_tcp,
+                        start_axis,
+                        target_axis,
+                    )
+                    if error is not None:
+                        max_ik = max(max_ik, error)
+                        if error > ik_abort:
+                            abort = AbortReason.IK_DIVERGED
+                    gripper = start_gripper + (leg / legs) * (waypoint.gripper - start_gripper)
 
                 executed = (
                     arm
                     if action_noise is None
-                    else arm + action_noise.sample(waypoint.phase, leg / legs)
+                    else arm + action_noise.sample(waypoint.phase, leg / legs, recovering=holding)
                 )
                 self._write_ctrl(data, executed, gripper)
                 for _ in range(self._decimation):

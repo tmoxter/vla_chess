@@ -5,6 +5,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
+from vla_chess.control.executor import ROLL_HOLD
 from vla_chess.control.planner import ArmQpos, _above
 from vla_chess.grasp.solver import (
     GRASP_HEIGHT,
@@ -322,3 +323,41 @@ class TestPreferredTiltedSolutions:
             prefer=BIRDS_EYE_ARM_QPOS,
         )
         assert abs(biased[roll] - survey_roll) < abs(free[roll] - survey_roll)
+
+
+class TestRollHold:
+    """A tracked step where wrist_flex sits on its stop and the residual barely depends on roll."""
+
+    # One control step of a retreat leg (a7a6), where an unheld tracker turned the roll 0.5 rad.
+    SEED = (
+        0.757025885182081,
+        0.578815009700483,
+        -0.6717323719330767,
+        1.6580627293335335,
+        1.4652239,
+    )
+    TARGET = (0.22174244885182529, -0.17419915613467327, 0.05702844989214963)
+    DOWN = (-0.0032832096432915624, -0.00327700646858186, -0.9999892408236416)
+    WEIGHT = 0.3
+
+    def _track(self, solver: VerticalGraspSolver, roll_hold: float) -> tuple[float, float]:
+        roll = ARM_JOINT_NAMES.index("wrist_roll")
+        default_down = solver._down
+        solver._down = np.asarray(self.DOWN)
+        try:
+            qpos, error, _ = solver.track(
+                np.asarray(self.TARGET), np.asarray(self.SEED), self.WEIGHT, roll_hold=roll_hold
+            )
+        finally:
+            solver._down = default_down
+        return abs(float(qpos[roll]) - self.SEED[roll]), error
+
+    def test_an_unheld_roll_swings_in_one_step(self, solver_scene: Scene) -> None:
+        turned, _ = self._track(solver_scene[0], roll_hold=0.0)
+        assert turned > 0.3
+
+    def test_a_held_roll_stays_put_at_the_same_reach(self, solver_scene: Scene) -> None:
+        free_turn, free_error = self._track(solver_scene[0], roll_hold=0.0)
+        held_turn, held_error = self._track(solver_scene[0], roll_hold=ROLL_HOLD)
+        assert held_turn < 0.1 * free_turn
+        assert held_error < free_error + 0.0005

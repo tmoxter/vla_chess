@@ -37,7 +37,7 @@ def fixed_camera(width: int = 64, height: int = 64) -> CameraSpec:
 
 
 class TestBackendCheck:
-    @pytest.mark.parametrize("backend", ["glfw", "", "OSMESA", "EGL"])
+    @pytest.mark.parametrize("backend", ["glfw", "", "OSMESA", "EGL", "CGL"])
     def test_unsupported_backend_raises_naming_the_variable(
         self, backend: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -45,7 +45,7 @@ class TestBackendCheck:
         monkeypatch.setenv("MUJOCO_GL", backend)
         with pytest.raises(RuntimeError, match="MUJOCO_GL") as excinfo:
             check_gl_backend()
-        assert "osmesa" in str(excinfo.value) and "egl" in str(excinfo.value)
+        assert all(name in str(excinfo.value) for name in ("osmesa", "egl", "cgl"))
 
     def test_unset_backend_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """An unset MUJOCO_GL is rejected rather than left to mujoco's autodetection."""
@@ -53,9 +53,9 @@ class TestBackendCheck:
         with pytest.raises(RuntimeError, match="MUJOCO_GL"):
             check_gl_backend()
 
-    @pytest.mark.parametrize("backend", ["osmesa", "egl"])
+    @pytest.mark.parametrize("backend", ["osmesa", "egl", "cgl"])
     def test_supported_backend_passes(self, backend: str, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Both supported backends (osmesa for CPU, egl for GPU) are accepted by the env check."""
+        """Every supported backend (osmesa on CPU, egl and cgl on GPU) passes the env check."""
         monkeypatch.setenv("MUJOCO_GL", backend)
         check_gl_backend()
 

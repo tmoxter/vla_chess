@@ -27,6 +27,7 @@ from vla_chess.analysis.reachability import (
     STEP4_YAW_JITTER_DEG,
     sample_board_pose,
 )
+from vla_chess.control.executor import DART_PHASE_GAINS, PROGRESS_GATES, ROLL_HOLD
 from vla_chess.control.planner import MoveSpec, PlanInfeasible
 from vla_chess.control.sampling import DEFAULT_ATTEMPTS, SampleKnobs
 from vla_chess.dataset.capture import load_capture, save_capture
@@ -440,6 +441,15 @@ def generate_funnel(
         "board_xy_jitter": board_xy_jitter,
         "board_yaw_jitter_deg": board_yaw_jitter_deg,
         "dart": None if dart is None else asdict(dart),
+        "dart_phase_gains": (
+            None if dart is None else {ph.value: list(g) for ph, g in DART_PHASE_GAINS.items()}
+        ),
+        "dart_gates": (
+            None
+            if dart is None or not dart.gated
+            else {ph.value: asdict(gate) for ph, gate in PROGRESS_GATES.items()}
+        ),
+        "roll_hold": ROLL_HOLD,
         "shard": list(shard),
         "reason_totals": dict(reason_totals),
         "per_move": {name: stat.as_dict() for name, stat in per_move.items()},
@@ -614,6 +624,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="DART noise correlation time constant in seconds",
     )
     parser.add_argument(
+        "--dart-ungated",
+        action="store_true",
+        help="advance the noisy expert on the clock instead of holding each leg, jaws included, "
+        "until the arm is back on its command (an ablation; gated is the DART default)",
+    )
+    parser.add_argument(
         "--dart-retries",
         type=int,
         default=DartKnobs.retries,
@@ -703,7 +719,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             board_xy_jitter=args.board_xy_jitter if args.diverse else 0.0,
             board_yaw_jitter_deg=args.board_yaw_jitter if args.diverse else 0.0,
             dart=(
-                DartKnobs(sigma=args.dart_sigma, tau=args.dart_tau, retries=args.dart_retries)
+                DartKnobs(
+                    sigma=args.dart_sigma,
+                    tau=args.dart_tau,
+                    retries=args.dart_retries,
+                    gated=not args.dart_ungated,
+                )
                 if args.dart_sigma > 0.0
                 else None
             ),

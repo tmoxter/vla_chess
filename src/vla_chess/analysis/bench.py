@@ -1,5 +1,8 @@
 import gc
 import os
+import resource
+import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -39,7 +42,11 @@ def read_rss_bytes() -> int:
         Resident set size in bytes, covering the interpreter and every library in it rather
         than the renderer alone.
     """
-    return _read_proc_status_kib("VmRSS:") * 1024
+    if sys.platform == "linux":
+        return _read_proc_status_kib("VmRSS:") * 1024
+    else:
+        ps = ["ps", "-o", "rss=", "-p", str(os.getpid())]
+        return int(subprocess.run(ps, capture_output=True, check=True, text=True).stdout) * 1024
 
 
 def read_peak_rss_bytes() -> int:
@@ -49,7 +56,11 @@ def read_peak_rss_bytes() -> int:
         High-water mark of resident set size in bytes, as the kernel has tracked it since
         the process started.
     """
-    return _read_proc_status_kib("VmHWM:") * 1024
+    if sys.platform == "linux":
+        return _read_proc_status_kib("VmHWM:") * 1024
+    else:
+        # macOS reports ru_maxrss in bytes, not kibibytes.
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
 
 def _read_proc_status_kib(field: str) -> int:
@@ -138,7 +149,10 @@ def _read_meminfo() -> dict[str, int]:
 
 def _online_cpus() -> list[int]:
     """CPU ids this process may run on."""
-    return sorted(os.sched_getaffinity(0))
+    if sys.platform == "linux":
+        return sorted(os.sched_getaffinity(0))
+    else:
+        return list(range(os.cpu_count() or 1))
 
 
 @dataclass(frozen=True)
