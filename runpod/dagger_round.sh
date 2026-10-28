@@ -30,8 +30,10 @@ MAX_ATTEMPTS="${MAX_ATTEMPTS:-8}"
 FRAME_ORDER="${FRAME_ORDER:?set FRAME_ORDER to random or carry}"
 CARRY_LEAD="${CARRY_LEAD:-45}"
 CARRY_PER_TIER="${CARRY_PER_TIER:-3}"
-# One takeover shard per CPU the container may use: nproc reports the host's cores, while the
-# cgroup quota is what the shards actually get.
+# One takeover shard per CPU the container may use, as far as its memory allows: nproc reports
+# the host's cores, while the cgroup quotas are what the shards actually get. A shard holds a
+# whole rollout's snapshots and a renderer, about 2 GB resident.
+SHARD_MEM_GB="${SHARD_MEM_GB:-3}"
 cpu_quota() {
   local quota period
   if [[ -r /sys/fs/cgroup/cpu.max ]] && read -r quota period </sys/fs/cgroup/cpu.max \
@@ -41,7 +43,18 @@ cpu_quota() {
     nproc
   fi
 }
-SHARDS="${SHARDS:-$(cpu_quota)}"
+memory_shards() {
+  local limit
+  if [[ -r /sys/fs/cgroup/memory.max ]] && read -r limit </sys/fs/cgroup/memory.max \
+      && [[ "${limit}" != "max" ]]; then
+    echo $(( limit / (SHARD_MEM_GB * 1024 ** 3) > 0 ? limit / (SHARD_MEM_GB * 1024 ** 3) : 1 ))
+  else
+    echo $(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / (SHARD_MEM_GB * 1024 ** 2) ))
+  fi
+}
+cpus="$(cpu_quota)"
+fits="$(memory_shards)"
+SHARDS="${SHARDS:-$(( cpus < fits ? cpus : fits ))}"
 SEED="${SEED:-0}"
 STEPS="${STEPS:-10000}"
 SAVE_FREQ="${SAVE_FREQ:-2000}"
