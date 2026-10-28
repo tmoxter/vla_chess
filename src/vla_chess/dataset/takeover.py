@@ -54,10 +54,22 @@ WRONG_SQUARE = "wrong_square"
 NOT_SETTLED = "not_settled"
 PLAN_INFEASIBLE = "plan_infeasible"
 NOT_NEAR_TARGET = "direct_not_near"
+RELEASED_HIGH = "released_high"
 
 # A piece let go of with its base higher than this above the playing surface was dropped rather
 # than set down, in metres.
 AIR_RELEASE = 0.003
+
+# A piece let go of with its base higher than this above the playing surface was let go of too
+# high, in metres. The clean expert sets a pawn down at a median of 2.6 mm (p90 3.5 mm, measured
+# over 304 accepted funnel runs of the trained one-step moves), and 95% of its releases fall below
+# this.
+HIGH_RELEASE = 0.006
+
+# How far the gripper command may rise above the tightest it held a piece at and still count as
+# closed, in radians. A grip settles within a few thousandths of its command; an opening jaw clears
+# this within a frame or two.
+OPEN_DELTA = 0.01
 
 
 @dataclass(frozen=True)
@@ -70,23 +82,152 @@ class TakeoverOutcome:
     rejects: Counter[str] = field(default_factory=Counter)
 
 
-def _reject_reason(result: ExecutionResult, target: str) -> str | None:
-    """Name why a recovery run is not a keep, or None when it is one."""
-    if result.abort_reason is not None:
-        return result.abort_reason.value
-    if result.final_square != target:
-        return WRONG_SQUARE
-    if not result.placed:
-        return NOT_SETTLED
-    return None
-
-
 @dataclass(frozen=True)
 class GripTrace:
     """Whether the moved piece was held, and how high it stood, at each frame of a rollout."""
 
     gripped: npt.NDArray[np.bool_]  # (frames,): both jaws bear on the piece
     height: npt.NDArray[np.float64]  # (frames,): piece base above the playing surface, m
+    jaw_command: npt.NDArray[np.float64]  # (frames,): gripper joint command in effect, rad
+
+
+@dataclass(frozen=True)
+class Release:
+    """One mid-air release of the moved piece, and whether the jaws were opened into it."""
+
+    frame: int  # last frame the piece was held
+    height: float  # piece base above the playing surface at that frame, m
+    opened: bool  # the jaw command had risen past the grip by more than OPEN_DELTA
+    last_closed: int  # last frame of the hold the jaws were still commanded closed
+
+
+def mid_air_releases(trace: GripTrace, above: float) -> list[Release]:
+    """Find where a rollout let go of its piece above the board, and how.
+
+    A release counts as mid-air when the piece base stands higher than `above` on the last frame
+    it was held. It was opened into when, by that frame, the jaw command had risen more than
+    `OPEN_DELTA` above the tightest it reached during the hold; otherwise the piece slipped out
+    of jaws still commanded closed.
+
+    Args:
+        trace: The rollout's grip trace.
+        above: Height of the piece base above the playing surface, in metres, that a release
+            has to exceed to count.
+
+    Returns:
+        The mid-air releases, in frame order.
+    """
+    releases = []
+    for frame in np.flatnonzero(trace.gripped[:-1] & ~trace.gripped[1:]):
+        if trace.height[frame] <= above:
+            continue
+        start = int(frame)
+        while start > 0 and trace.gripped[start - 1]:
+            start -= 1
+        jaw = trace.jaw_command[start : frame + 1]
+        closed = np.flatnonzero(jaw <= jaw.min() + OPEN_DELTA)
+        last_closed = start + int(closed[-1])
+        releases.append(
+            Release(
+                frame=int(frame),
+                height=float(trace.height[frame]),
+                opened=bool(last_closed < frame),
+                last_closed=last_closed,
+            )
+        )
+    return releases
+
+
+def recovery_reject_reason(result: ExecutionResult, target: str, trace: GripTrace) -> str | None:
+    """Name why a recovery run is not a keep, or None when it is one.
+
+    A recovery is kept only when it ran to the end, left the piece standing on its target, and
+    set it down rather than letting go of it higher than `HIGH_RELEASE`: one that lets go high
+    demonstrates the release it is meant to correct, even when the piece happens to land upright.
+
+    Args:
+        result: The recovery's execution.
+        target: The square the piece has to end on.
+        trace: Grip trace of the recovery, one entry per control step.
+
+    Returns:
+        The executor's abort reason, `WRONG_SQUARE`, `NOT_SETTLED` or `RELEASED_HIGH`, in that
+        order of precedence; None for a keep.
+    """
+    if result.abort_reason is not None:
+        return result.abort_reason.value
+    if result.final_square != target:
+        return WRONG_SQUARE
+    if not result.placed:
+        return NOT_SETTLED
+    if mid_air_releases(trace, HIGH_RELEASE):
+        return RELEASED_HIGH
+    return None
+
+
+class _GripRecorder:
+    """Builds a grip trace of a run as it executes, one entry per control step."""
+
+    def __init__(
+        self, model: mujoco.MjModel, piece_body: int, gripper_actuator: int, surface: float
+    ) -> None:
+        """Bind the recorder to the piece it watches.
+
+        Args:
+            model: Scene model the run executes in.
+            piece_body: Body id of the moved piece.
+            gripper_actuator: Actuator id of the gripper, whose command is read each step.
+            surface: Height of the playing surface in the world frame, in metres.
+        """
+        self._model = model
+        self._body = piece_body
+        self._actuator = gripper_actuator
+        self._surface = surface
+        self._gripped: list[bool] = []
+        self._height: list[float] = []
+        self._jaw: list[float] = []
+
+    def on_control_step(self, step: int, data: mujoco.MjData) -> None:
+        """Record one stepped state; shaped for `Executor.run`'s callback."""
+        self._gripped.append(grip_contacts(self._model, data, self._body).is_gripped())
+        self._height.append(float(data.xpos[self._body][2]) - self._surface)
+        self._jaw.append(float(data.ctrl[self._actuator]))
+
+    def trace(self) -> GripTrace:
+        """Return the trace recorded so far."""
+        return GripTrace(
+            gripped=np.array(self._gripped, dtype=bool),
+            height=np.array(self._height),
+            jaw_command=np.array(self._jaw),
+        )
+
+
+def release_order(trace: GripTrace, skip: int, lead: int, rng: np.random.Generator) -> list[int]:
+    """Pick the frames of a rollout from before it opened the jaws on a piece held too high.
+
+    For every release above `HIGH_RELEASE` the jaws were opened into, the last `lead` frames of
+    the hold up to and including the last one still commanded closed are eligible; nothing else
+    is. A rollout that slipped its piece, set it down, or never held it has no frames to try.
+
+    Args:
+        trace: The rollout's grip trace.
+        skip: How many leading frames to leave out; the policy has barely acted on them.
+        lead: How many held frames before the opening are eligible.
+        rng: Source of the shuffle.
+
+    Returns:
+        The eligible frame indices in random order, for the caller to try until it has as many
+        takeovers as it wants.
+    """
+    eligible: set[int] = set()
+    for release in mid_air_releases(trace, HIGH_RELEASE):
+        if not release.opened:
+            continue
+        first = release.last_closed - lead + 1
+        while first < 0 or not trace.gripped[first]:
+            first += 1
+        eligible.update(range(max(first, skip), release.last_closed + 1))
+    return [int(i) for i in rng.permutation(np.array(sorted(eligible), dtype=np.int64))]
 
 
 def carry_order(
@@ -209,6 +350,11 @@ class TakeoverRunner:
         scratch = make_data(model, index)
         assessment = assess(model, start, index, spec, VerticalGraspSolver(model, scratch, index))
         executor = Executor(model, index, control_hz=self._control_hz)
+        body = index.piece_body_id[spec.source]
+        surface = index.board.surface_height
+
+        def grip_recorder() -> _GripRecorder:
+            return _GripRecorder(model, body, index.gripper_actuator_id, surface)
 
         rejects: Counter[str] = Counter()
         attempts = 0
@@ -232,8 +378,11 @@ class TakeoverRunner:
                 rejects[PLAN_INFEASIBLE] += 1
                 continue
             attempts += 1
-            dry = executor.run(restored(), plan, ik_abort=TILTED_IK_ABORT)
-            reason = _reject_reason(dry, spec.target)
+            watch = grip_recorder()
+            dry = executor.run(
+                restored(), plan, on_control_step=watch.on_control_step, ik_abort=TILTED_IK_ABORT
+            )
+            reason = recovery_reject_reason(dry, spec.target, watch.trace())
             if reason is None:
                 kept = plan
                 break
@@ -244,14 +393,20 @@ class TakeoverRunner:
 
         with Renderer(model, self._cameras) as renderer:
             recorder = ObservationRecorder(renderer, fps=self._fps, control_hz=self._control_hz)
+            watch = grip_recorder()
+
+            def on_control_step(step: int, data: mujoco.MjData) -> None:
+                recorder.on_control_step(step, data)
+                watch.on_control_step(step, data)
+
             result = executor.run(
                 restored(),
                 kept,
-                on_control_step=recorder.on_control_step,
+                on_control_step=on_control_step,
                 ik_abort=TILTED_IK_ABORT,
             )
             frames = recorder.frames(result)
-        if _reject_reason(result, spec.target) is not None or not frames:
+        if recovery_reject_reason(result, spec.target, watch.trace()) is not None or not frames:
             # The rendered re-run must reproduce the dry run it was chosen from.
             rejects["not_reproduced"] += 1
             return TakeoverOutcome(assessment.situation, None, attempts, rejects)
@@ -285,11 +440,13 @@ class TakeoverRunner:
         surface = index.board.surface_height
         gripped = np.zeros(len(snapshots), dtype=bool)
         height = np.zeros(len(snapshots))
+        jaw_command = np.zeros(len(snapshots))
         for frame, snapshot in enumerate(snapshots):
             restore_state(model, data, snapshot)
             gripped[frame] = grip_contacts(model, data, body).is_gripped()
             height[frame] = float(data.xpos[body][2]) - surface
-        return GripTrace(gripped=gripped, height=height)
+            jaw_command[frame] = float(data.ctrl[index.gripper_actuator_id])
+        return GripTrace(gripped=gripped, height=height, jaw_command=jaw_command)
 
 
 class Takeover(Protocol):
@@ -327,8 +484,8 @@ def take_over_rollout(
         runner: What records a takeover from one snapshot.
         wanted: How many kept episodes to stop at.
         max_attempts: How many recoverable frames to try at most.
-        order: The frames to try, in the order to try them; see `takeover_order` and
-            `carry_order`.
+        order: The frames to try, in the order to try them; see `takeover_order`,
+            `carry_order` and `release_order`.
         base_seed: Offset of the per-frame seeds; frame `f` is taken over with
             `base_seed + f`.
 

@@ -69,6 +69,7 @@ from vla_chess.dataset.episode import (
 )
 from vla_chess.dataset.observe import DEFAULT_FPS
 from vla_chess.dataset.rollouts import RecordedRollout, rollout_path, save_rollout
+from vla_chess.dataset.takeover import HIGH_RELEASE, GripTrace, mid_air_releases
 from vla_chess.sensor.render import Renderer
 from vla_chess.sim.positions import single_pawn_position
 from vla_chess.sim.scene import (
@@ -136,6 +137,8 @@ class RolloutMetrics:
     grasped: bool  # both jaws ever bore on the piece
     lifted: bool  # ... while the piece was clear of the board
     placed: bool  # came to rest upright on the target square
+    opened_mid_air: bool  # the jaws were opened on the piece higher than HIGH_RELEASE
+    slipped_mid_air: bool  # the piece left jaws still commanded closed, higher than HIGH_RELEASE
     settled: bool
     final_square: str | None
     terminal_to_target_m: float  # piece resting distance from the target-square centre
@@ -307,6 +310,9 @@ def _drive_once(
 
     joints: list[np.ndarray] = []
     snapshots: list[np.ndarray] = []
+    held: list[bool] = []
+    heights: list[float] = []
+    jaw_commands: list[float] = []
     grasped = lifted = False
     for _ in range(max_frames):
         if record is not None:
@@ -321,11 +327,24 @@ def _drive_once(
         executor._write_ctrl(data, action_np[:5], float(action_np[5]))
         for _ in range(frame_substeps):
             mujoco.mj_step(model, data)
-        if executor._holding(data, piece_body):
+        holding = executor._holding(data, piece_body)
+        height = float(data.xpos[piece_body][2]) - surface
+        held.append(holding)
+        heights.append(height)
+        jaw_commands.append(float(data.ctrl[index.gripper_actuator_id]))
+        if holding:
             grasped = True
-            if float(data.xpos[piece_body][2]) - surface > LIFT_CLEARANCE_M:
+            if height > LIFT_CLEARANCE_M:
                 lifted = True
 
+    releases = mid_air_releases(
+        GripTrace(
+            gripped=np.array(held, dtype=bool),
+            height=np.array(heights),
+            jaw_command=np.array(jaw_commands),
+        ),
+        HIGH_RELEASE,
+    )
     check = executor.placement(data, spec.source, spec.target)
     piece_xyz = np.asarray(data.xpos[piece_body], dtype=float)
     target_xyz = np.asarray(index.board.square_to_world(spec.target, index.board_pose), dtype=float)
@@ -363,6 +382,8 @@ def _drive_once(
         grasped=grasped,
         lifted=lifted,
         placed=bool(check.placed),
+        opened_mid_air=any(r.opened for r in releases),
+        slipped_mid_air=any(not r.opened for r in releases),
         settled=bool(check.settled),
         final_square=check.final_square,
         terminal_to_target_m=float(np.linalg.norm(piece_xyz[:2] - target_xyz[:2])),
@@ -507,6 +528,8 @@ def run_policy_sweep(args: argparse.Namespace) -> dict[str, Any]:
     grasp_p, grasp_lo, grasp_hi = wilson_interval(sum(r.grasped for r in records), n)
     lift_p, lift_lo, lift_hi = wilson_interval(sum(r.lifted for r in records), n)
     place_p, place_lo, place_hi = wilson_interval(sum(r.placed for r in records), n)
+    opened_p, opened_lo, opened_hi = wilson_interval(sum(r.opened_mid_air for r in records), n)
+    slipped_p, slipped_lo, slipped_hi = wilson_interval(sum(r.slipped_mid_air for r in records), n)
 
     def summary(values: list[float]) -> dict[str, float]:
         a = np.asarray(values)
@@ -521,11 +544,15 @@ def run_policy_sweep(args: argparse.Namespace) -> dict[str, Any]:
 
     per_move: dict[str, dict[str, int]] = {}
     for r in records:
-        tally = per_move.setdefault(r.move, {"rollouts": 0, "grasped": 0, "lifted": 0, "placed": 0})
+        tally = per_move.setdefault(
+            r.move,
+            {"rollouts": 0, "grasped": 0, "lifted": 0, "placed": 0, "opened_mid_air": 0},
+        )
         tally["rollouts"] += 1
         tally["grasped"] += int(r.grasped)
         tally["lifted"] += int(r.lifted)
         tally["placed"] += int(r.placed)
+        tally["opened_mid_air"] += int(r.opened_mid_air)
 
     return {
         "mode": "policy_sweep",
@@ -547,6 +574,8 @@ def run_policy_sweep(args: argparse.Namespace) -> dict[str, Any]:
         "grasp_rate": {"p": grasp_p, "ci95": [grasp_lo, grasp_hi]},
         "lift_rate": {"p": lift_p, "ci95": [lift_lo, lift_hi]},
         "placement_rate": {"p": place_p, "ci95": [place_lo, place_hi]},
+        "opened_mid_air_rate": {"p": opened_p, "ci95": [opened_lo, opened_hi]},
+        "slipped_mid_air_rate": {"p": slipped_p, "ci95": [slipped_lo, slipped_hi]},
         "terminal_to_target_m": summary([r.terminal_to_target_m for r in records]),
         "joint_disp_mean_rad": summary([r.joint_disp_mean for r in records]),
         "tcp_disp_mean_m": summary([r.tcp_disp_mean for r in records]),

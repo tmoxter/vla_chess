@@ -1,9 +1,10 @@
 """Record expert takeovers of recorded policy rollouts into a LeRobot dataset, resumably.
 
 The aggregation half of a DAgger round. Each rollout written by `eval_metrics --record-states` is
-taken over at random frames by the scripted expert, and every recovery that places the piece is
-captured as an episode. A rollout is done once its tally file exists, so an interrupted or sharded
-run picks up where it stopped; serializing the captures into a dataset is a separate final pass.
+taken over by the scripted expert at frames picked by `--frame-order`, and every recovery that
+places the piece is captured as an episode. A rollout is done once its tally file exists, so an
+interrupted or sharded run picks up where it stopped; serializing the captures into a dataset is
+a separate final pass.
 Runs in the `datagen` pixi env (the serializer imports lerobot).
 """
 
@@ -24,15 +25,18 @@ from vla_chess.dataset.capture import save_capture
 from vla_chess.dataset.episode import git_engine_version
 from vla_chess.dataset.rollouts import load_rollout
 from vla_chess.dataset.takeover import (
+    HIGH_RELEASE,
     TakeoverRunner,
     carry_order,
+    mid_air_releases,
+    release_order,
     take_over_rollout,
     takeover_order,
 )
 from vla_chess.sim.positions import single_pawn_position
 
 MANIFEST_NAME = "takeover-manifest.json"
-FRAME_ORDERS = ("random", "carry")
+FRAME_ORDERS = ("random", "carry", "release")
 
 
 def _tally_path(captures: Path, rollout: Path) -> Path:
@@ -50,6 +54,7 @@ def take_over(
     frame_order: str,
     carry_lead: int,
     carry_per_tier: int,
+    release_lead: int,
     fps: float,
     seed: int,
     shard: tuple[int, int],
@@ -63,9 +68,12 @@ def take_over(
         skip: Leading frames of a rollout never taken over from.
         max_attempts: Recoverable frames tried at most per rollout.
         frame_order: "random" tries frames in a random order; "carry" tries the frames
-            carrying the piece first, those just before a mid-air release ahead of the rest.
+            carrying the piece first, those just before a mid-air release ahead of the rest;
+            "release" tries only the held frames just before the jaws were opened on the piece
+            higher than `HIGH_RELEASE`, and leaves a rollout that never did so alone.
         carry_lead: Held frames before a mid-air release that "carry" may put first.
         carry_per_tier: Frames each held tier of "carry" puts ahead of the rest.
+        release_lead: Held frames before a mid-air opening that "release" may try.
         fps: Capture frame rate of the kept episodes.
         seed: Base seed; rollout `i` shuffles its frames from `[seed, i]`.
         shard: `(i, n)` — take over only the rollouts whose index is `i` mod `n`.
@@ -83,9 +91,11 @@ def take_over(
         )
         started = time.monotonic()
         rng = np.random.default_rng([seed, i])
+        trace = runner.grip_trace(rollout.spec(), rollout.snapshots)
         if frame_order == "carry":
-            trace = runner.grip_trace(rollout.spec(), rollout.snapshots)
             order = carry_order(trace, skip, carry_lead, carry_per_tier, rng)
+        elif frame_order == "release":
+            order = release_order(trace, skip, release_lead, rng)
         elif frame_order == "random":
             order = takeover_order(len(rollout.snapshots), skip, rng)
         else:
@@ -115,6 +125,10 @@ def take_over(
             "rollout": path.name,
             "move": f"{rollout.source}->{rollout.target}",
             "rollout_placed": rollout.placed,
+            "mid_air_releases": [
+                {"frame": r.frame, "height_m": r.height, "opened": r.opened}
+                for r in mid_air_releases(trace, HIGH_RELEASE)
+            ],
             "frames": frames,
         }
         tally_file.write_text(json.dumps(tally, indent=2) + "\n")
@@ -133,15 +147,21 @@ def summarize(captures: Path) -> dict[str, object]:
         captures: Directory `take_over` wrote its tallies under.
 
     Returns:
-        Rollouts covered, frames tried and kept, and the count of each situation met.
+        Rollouts covered, frames tried and kept, the count of each situation met, and how many
+        rollouts opened the jaws on their piece in mid-air or let it slip from closed jaws.
     """
     situations: Counter[str] = Counter()
+    released: Counter[str] = Counter()
     kept_by_situation: Counter[str] = Counter()
     rejects: Counter[str] = Counter()
     rollouts = tried = kept = 0
     for path in sorted(captures.glob("rollout-*.json")):
         tally = json.loads(path.read_text())
         rollouts += 1
+        # Tallies written before releases were recorded carry no such list.
+        releases = tally.get("mid_air_releases", [])
+        released["opened"] += any(r["opened"] for r in releases)
+        released["slipped"] += any(not r["opened"] for r in releases)
         for frame in tally["frames"]:
             tried += 1
             situations[frame["situation"]] += 1
@@ -156,6 +176,7 @@ def summarize(captures: Path) -> dict[str, object]:
         "situations": dict(situations),
         "kept_by_situation": dict(kept_by_situation),
         "rejects": dict(rejects),
+        "rollouts_released_mid_air": dict(released),
     }
 
 
@@ -187,7 +208,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--frame-order",
         choices=FRAME_ORDERS,
         required=True,
-        help="random: any frame; carry: frames carrying the piece first",
+        help="random: any frame; carry: frames carrying the piece first; release: only frames "
+        "just before the jaws were opened on the piece too high above the board",
     )
     parser.add_argument(
         "--carry-lead",
@@ -200,6 +222,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         default=3,
         help="frames each held tier puts ahead of the rest under --frame-order carry",
+    )
+    parser.add_argument(
+        "--release-lead",
+        type=int,
+        default=30,
+        help="held frames before a mid-air opening eligible under --frame-order release",
     )
     parser.add_argument("--fps", type=float, default=30.0, help="capture rate of kept episodes")
     parser.add_argument("--seed", type=int, default=0)
@@ -234,6 +262,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         frame_order=args.frame_order,
         carry_lead=args.carry_lead,
         carry_per_tier=args.carry_per_tier,
+        release_lead=args.release_lead,
         fps=args.fps,
         seed=args.seed,
         shard=_parse_shard(args.shard),

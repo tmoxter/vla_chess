@@ -91,6 +91,26 @@ def test_a_multi_move_sweep_also_yields_per_move_rates() -> None:
     assert metrics["sweep/d7_d6/placed_rate"] == 0.0
 
 
+def test_a_sweep_that_tracked_mid_air_releases_yields_their_rates() -> None:
+    report = {
+        "rollouts": 4,
+        "grasp_rate": _rate(0.5),
+        "lift_rate": _rate(0.5),
+        "placement_rate": _rate(0.25),
+        "opened_mid_air_rate": _rate(0.25),
+        "slipped_mid_air_rate": _rate(0.0),
+        "terminal_to_target_m": {},
+        "per_move": {
+            "c7->c6": {"rollouts": 2, "grasped": 1, "lifted": 1, "placed": 1, "opened_mid_air": 1},
+            "d7->d6": {"rollouts": 2, "grasped": 1, "lifted": 1, "placed": 0, "opened_mid_air": 0},
+        },
+    }
+    metrics = policy_sweep_metrics(report, "sweep")
+    assert metrics["sweep/opened_mid_air_rate"] == 0.25
+    assert metrics["sweep/slipped_mid_air_rate_ci95_hi"] == pytest.approx(0.01)
+    assert metrics["sweep/c7_c6/opened_mid_air_rate"] == 0.5
+
+
 def test_an_expert_baseline_yields_its_rates() -> None:
     report = {"reps": 10, "grasp_count": 10, "placement_count": 9}
     assert expert_baseline_metrics(report, "expert") == {
@@ -138,3 +158,18 @@ def test_a_takeover_manifest_yields_its_tallies() -> None:
         "takeovers/kept/to_grasp": 2.0,
         "takeovers/rejects/direct_not_near": 2.0,
     }
+
+
+def test_a_takeover_manifest_with_release_tallies_yields_them() -> None:
+    manifest = {
+        "rollouts": 3,
+        "frames_tried": 2,
+        "kept": 1,
+        "situations": {"in_hand": 2},
+        "kept_by_situation": {"in_hand": 1},
+        "rejects": {},
+        "rollouts_released_mid_air": {"opened": 2, "slipped": 1},
+    }
+    metrics = takeover_metrics(manifest)
+    assert metrics["takeovers/rollouts_released_mid_air/opened"] == 2.0
+    assert metrics["takeovers/rollouts_released_mid_air/slipped"] == 1.0

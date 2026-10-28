@@ -1,17 +1,30 @@
 import numpy as np
 import pytest
 
-from vla_chess.control.executor import TILTED_IK_ABORT, Executor
+from vla_chess.control.executor import (
+    TILTED_IK_ABORT,
+    AbortReason,
+    ExecutionDiagnostics,
+    ExecutionResult,
+    Executor,
+)
 from vla_chess.control.planner import MoveSpec, Phase
 from vla_chess.control.recovery import Situation
 from vla_chess.control.sampling import SampleKnobs, plan_candidate, sample_candidates
 from vla_chess.dataset.episode import move_scene_description
 from vla_chess.dataset.rollouts import RecordedRollout
 from vla_chess.dataset.takeover import (
+    AIR_RELEASE,
+    HIGH_RELEASE,
+    OPEN_DELTA,
+    RELEASED_HIGH,
     GripTrace,
     TakeoverOutcome,
     TakeoverRunner,
     carry_order,
+    mid_air_releases,
+    recovery_reject_reason,
+    release_order,
     take_over_rollout,
     takeover_order,
 )
@@ -76,7 +89,89 @@ def _trace(frames: int, held: range, release_height: float) -> GripTrace:
     gripped[held.start : held.stop] = True
     height = np.zeros(frames)
     height[held.stop - 1] = release_height
-    return GripTrace(gripped=gripped, height=height)
+    return GripTrace(gripped=gripped, height=height, jaw_command=np.zeros(frames))
+
+
+def _opening_trace(frames: int, held: range, opens_at: int, release_height: float) -> GripTrace:
+    trace = _trace(frames, held, release_height)
+    jaw = np.zeros(frames)
+    jaw[opens_at:] = np.linspace(2 * OPEN_DELTA, 4 * OPEN_DELTA, frames - opens_at)
+    return GripTrace(gripped=trace.gripped, height=trace.height, jaw_command=jaw)
+
+
+def test_a_release_the_jaws_opened_into_is_told_from_a_slip() -> None:
+    opened = mid_air_releases(_opening_trace(40, range(10, 30), 26, 0.012), HIGH_RELEASE)
+    slipped = mid_air_releases(_trace(40, range(10, 30), 0.012), HIGH_RELEASE)
+    assert [(r.frame, r.opened, r.last_closed) for r in opened] == [(29, True, 25)]
+    assert [(r.frame, r.opened, r.last_closed) for r in slipped] == [(29, False, 29)]
+    assert opened[0].height == pytest.approx(0.012)
+
+
+def test_a_piece_set_down_is_not_a_mid_air_release() -> None:
+    assert mid_air_releases(_opening_trace(40, range(10, 30), 26, 0.001), AIR_RELEASE) == []
+
+
+def test_a_release_counts_as_mid_air_only_above_the_height_asked_for() -> None:
+    trace = _opening_trace(40, range(10, 30), 26, 0.004)
+    assert len(mid_air_releases(trace, AIR_RELEASE)) == 1
+    assert mid_air_releases(trace, HIGH_RELEASE) == []
+
+
+def test_release_order_leaves_out_an_opening_as_low_as_the_expert_lets_go() -> None:
+    trace = _opening_trace(40, range(10, 30), 26, 0.004)
+    assert release_order(trace, skip=0, lead=5, rng=np.random.default_rng(0)) == []
+
+
+def _result(*, placed: bool = True, abort_reason: AbortReason | None = None) -> ExecutionResult:
+    return ExecutionResult(
+        states=np.zeros((1, 6)),
+        actions=np.zeros((1, 6)),
+        phases=(Phase.RELEASE,),
+        phase_boundaries={Phase.RELEASE: (0, 0)},
+        grasped=True,
+        placed=placed,
+        final_square="d6",
+        abort_reason=abort_reason,
+        diagnostics=ExecutionDiagnostics(0.0, 0.0, 1, 1, 0.0),
+    )
+
+
+def test_a_recovery_that_sets_the_piece_down_on_target_is_kept() -> None:
+    trace = _opening_trace(40, range(10, 30), 26, 0.003)
+    assert recovery_reject_reason(_result(), "d6", trace) is None
+
+
+def test_a_recovery_that_lets_go_of_the_piece_high_is_rejected_though_it_landed() -> None:
+    trace = _opening_trace(40, range(10, 30), 26, 0.010)
+    assert recovery_reject_reason(_result(), "d6", trace) == RELEASED_HIGH
+
+
+def test_a_recovery_that_aborted_is_rejected_for_the_abort() -> None:
+    trace = _opening_trace(40, range(10, 30), 26, 0.010)
+    reason = recovery_reject_reason(
+        _result(placed=False, abort_reason=AbortReason.IK_DIVERGED), "d6", trace
+    )
+    assert reason == AbortReason.IK_DIVERGED.value
+
+
+def test_release_order_tries_only_the_held_frames_before_the_jaws_opened() -> None:
+    order = release_order(
+        _opening_trace(40, range(10, 30), 26, 0.012), skip=2, lead=5, rng=np.random.default_rng(0)
+    )
+    assert sorted(order) == list(range(21, 26))
+
+
+def test_release_order_stops_at_the_first_frame_held() -> None:
+    order = release_order(
+        _opening_trace(40, range(10, 30), 13, 0.012), skip=0, lead=8, rng=np.random.default_rng(0)
+    )
+    assert sorted(order) == [10, 11, 12]
+
+
+def test_release_order_has_nothing_to_try_when_the_piece_slipped_or_was_set_down() -> None:
+    rng = np.random.default_rng(0)
+    assert release_order(_trace(40, range(10, 30), 0.012), skip=0, lead=5, rng=rng) == []
+    assert release_order(_trace(40, range(10, 30), 0.001), skip=0, lead=5, rng=rng) == []
 
 
 def test_carry_order_tries_the_frames_before_a_mid_air_release_first() -> None:
@@ -107,7 +202,9 @@ def test_carry_order_caps_the_held_frames_put_first() -> None:
 
 
 def test_carry_order_of_a_rollout_that_never_grips_covers_every_frame() -> None:
-    trace = GripTrace(gripped=np.zeros(12, dtype=bool), height=np.zeros(12))
+    trace = GripTrace(
+        gripped=np.zeros(12, dtype=bool), height=np.zeros(12), jaw_command=np.zeros(12)
+    )
     order = carry_order(trace, skip=3, lead=5, per_tier=3, rng=np.random.default_rng(0))
     assert sorted(order) == list(range(3, 12))
 
@@ -121,6 +218,8 @@ def test_the_grip_trace_reads_the_piece_held_mid_transport(
     )
     assert trace.gripped.tolist() == [False, True]
     assert trace.height[0] < 0.003 < trace.height[1]
+    # The jaws approach open and carry closed on the piece.
+    assert trace.jaw_command[1] < trace.jaw_command[0] - OPEN_DELTA
 
 
 def test_a_takeover_mid_transport_records_the_expert_finishing_the_move(

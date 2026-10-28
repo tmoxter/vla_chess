@@ -96,11 +96,13 @@ def policy_sweep_metrics(report: Mapping[str, Any], prefix: str) -> dict[str, fl
         prefix: Metric name prefix, e.g. "eval_d7d6".
 
     Returns:
-        Grasp, lift and placement rates with their 95% bounds, the rollout count, the terminal
-        piece distance summary, and per-move rates when the sweep drove more than one move.
+        Grasp, lift and placement rates with their 95% bounds, the mid-air opening and slipping
+        rates likewise where the report tracked them, the rollout count, the terminal piece
+        distance summary, and per-move rates when the sweep drove more than one move.
     """
     metrics: dict[str, float] = {f"{prefix}/rollouts": float(report["rollouts"])}
-    for rate in ("grasp_rate", "lift_rate", "placement_rate"):
+    tracked = ("opened_mid_air_rate", "slipped_mid_air_rate")
+    for rate in ("grasp_rate", "lift_rate", "placement_rate", *(r for r in tracked if r in report)):
         metrics[f"{prefix}/{rate}"] = float(report[rate]["p"])
         metrics[f"{prefix}/{rate}_ci95_lo"] = float(report[rate]["ci95"][0])
         metrics[f"{prefix}/{rate}_ci95_hi"] = float(report[rate]["ci95"][1])
@@ -110,7 +112,9 @@ def policy_sweep_metrics(report: Mapping[str, Any], prefix: str) -> dict[str, fl
     if len(per_move) > 1:
         for move, tally in per_move.items():
             name = move.replace("->", "_")
-            for outcome in ("grasped", "lifted", "placed"):
+            for outcome in ("grasped", "lifted", "placed", "opened_mid_air"):
+                if outcome not in tally:
+                    continue
                 metrics[f"{prefix}/{name}/{outcome}_rate"] = tally[outcome] / tally["rollouts"]
     return metrics
 
@@ -180,7 +184,8 @@ def takeover_metrics(manifest: Mapping[str, Any], prefix: str = "takeovers") -> 
 
     Returns:
         Rollouts, frames tried and takeovers kept, then the frames tried and the takeovers kept
-        per situation, and the count of each reject reason.
+        per situation, the count of each reject reason, and, where the manifest tallied them,
+        how many rollouts opened the jaws on their piece in mid-air or let it slip.
     """
     metrics = {
         f"{prefix}/{key}": float(manifest[key]) for key in ("rollouts", "frames_tried", "kept")
@@ -189,7 +194,8 @@ def takeover_metrics(manifest: Mapping[str, Any], prefix: str = "takeovers") -> 
         ("situations", "tried"),
         ("kept_by_situation", "kept"),
         ("rejects", "rejects"),
+        ("rollouts_released_mid_air", "rollouts_released_mid_air"),
     ):
-        for key, count in manifest[group].items():
+        for key, count in manifest.get(group, {}).items():
             metrics[f"{prefix}/{name}/{key}"] = float(count)
     return metrics
