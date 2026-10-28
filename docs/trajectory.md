@@ -308,6 +308,18 @@ which the same plan places the piece. It is a plateau, not a tuned point — 8, 
 place it — bounded above: at 20 the contacts go unstable at this timestep and throw the piece
 129 mm into the air.
 
+That slows the creep without stopping it. A pinch low on the pawn's stem, below the head, holds
+the piece at ~1.3 N of normal force, enough for over ten times its weight at any realistic
+friction. Yet with the arm frozen and the jaws closed, the pawn slides out within 1-2 s. Of 193
+lifted grips taken from recorded policy rollouts, 43 lost the piece within 2 s of a frozen hold.
+21 of those were already toppling at the snapshot, tilted about 100 degrees. A 0.5 ms timestep
+changes nothing, so the cause is not step size. The scene therefore also builds with 10 noslip
+iterations (`scene.NOSLIP_ITERATIONS`), a post-pass that re-solves the friction rows without the
+softness. With it, all 22 of the remaining creeping grips hold. The expert's own grips, which take
+the head as well, hold for 5 s either way. The DART funnel's yield is unchanged: 40 of 40 slots
+kept, 304 of 320 candidates accepted, and 150 of 160 noisy draws placed, against 303 and 154
+without the post-pass. It adds about 50% to a physics step (27 to 41 µs).
+
 ## The episode that works
 
 805 control steps, 16.1 s, 161 frames, no aborts. Maximum tracking error 0.0082 rad, maximum IK

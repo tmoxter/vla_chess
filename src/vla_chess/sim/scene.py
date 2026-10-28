@@ -598,6 +598,13 @@ APPROACH_MARGIN: Final = 0.003
 # 20 does not: contacts that stiff go unstable at this timestep and throw the piece.
 FRICTION_IMPEDANCE_RATIO: Final = 10.0
 
+# Soft friction still lets a held pinch creep, just more slowly: with the arm frozen and the jaws
+# closed, a pawn pinched low on its stem at ~1.3 N slides out within 1-2 s, a grip that holds ten
+# times the pawn's weight in static friction. A smaller timestep does not change that. The noslip
+# post-pass solves the friction rows again without the softness and holds every such grip that
+# has not already started to topple, for ~50% more time per physics step.
+NOSLIP_ITERATIONS: Final = 10
+
 
 def _radius_at(geom: _PieceGeom, height: float) -> float:
     """Measure the radius one piece geom presents at a height.
@@ -1070,6 +1077,7 @@ def build_scene(desc: SceneDescription) -> tuple[mujoco.MjModel, SceneIndex]:
     spec.visual.global_.offheight = RENDER_OFFHEIGHT
     spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
     spec.option.impratio = FRICTION_IMPEDANCE_RATIO
+    spec.option.noslip_iterations = NOSLIP_ITERATIONS
     _split_hand_collision(spec)
     _add_pinch_site(spec, desc.pinch_offset)
 

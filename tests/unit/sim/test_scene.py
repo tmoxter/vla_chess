@@ -10,6 +10,7 @@ from vla_chess.sim.scene import (
     FIXED_FACE_INSET,
     FRICTION_IMPEDANCE_RATIO,
     GRIP_SQUEEZE,
+    NOSLIP_ITERATIONS,
     Board,
     BoardPose,
     PieceColor,
@@ -241,3 +242,8 @@ class TestContactModel:
         model, _ = build_scene(SceneDescription())
         assert model.opt.cone == mujoco.mjtCone.mjCONE_ELLIPTIC
         assert model.opt.impratio == pytest.approx(FRICTION_IMPEDANCE_RATIO)
+
+    def test_the_scene_removes_the_slip_soft_friction_leaves_in_a_held_pinch(self) -> None:
+        model, _ = build_scene(SceneDescription())
+        assert NOSLIP_ITERATIONS > 0
+        assert model.opt.noslip_iterations == NOSLIP_ITERATIONS
