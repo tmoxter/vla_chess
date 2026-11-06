@@ -580,8 +580,9 @@ FINGER_BAND: Final = (-0.008, 0.026)
 # How far past first contact a grip closes. Two of these four millimetres are spent reaching
 # the stem past a head that is 1 mm wider on each side; the rest is the squeeze proper. At
 # 2 mm the pinch holds only the head — two point contacts on a sphere — and the piece rolls out
-# under the lift. Commanding the mechanical stop instead saturates the servo (~3.35 N·m over a
-# ~77 mm lever, ~43 N on a 15 g piece), which is why the command is sized to the piece at all.
+# under the lift. The squeeze sets where the jaws are commanded to, not how hard they grip: once
+# the faces stop on the piece the servo stalls at its torque limit (`GRIPPER_TORQUE_FRACTION`),
+# whatever the command past contact.
 GRIP_SQUEEZE: Final = 0.004
 
 # Slack in the opening the hand approaches and leaves a piece at, over what the piece and its
@@ -598,12 +599,29 @@ APPROACH_MARGIN: Final = 0.003
 # 20 does not: contacts that stiff go unstable at this timestep and throw the piece.
 FRICTION_IMPEDANCE_RATIO: Final = 10.0
 
-# Soft friction still lets a held pinch creep, just more slowly: with the arm frozen and the jaws
-# closed, a pawn pinched low on its stem at ~1.3 N slides out within 1-2 s, a grip that holds ten
-# times the pawn's weight in static friction. A smaller timestep does not change that. The noslip
-# post-pass solves the friction rows again without the softness and holds every such grip that
-# has not already started to topple, for ~50% more time per physics step.
+# Soft friction still lets a held pinch creep, just more slowly, and a smaller timestep does not
+# change that: over the expert's carries a pawn held at the servo's torque limit slides a median
+# 0.14 mm in the hand. The noslip post-pass solves the friction rows again without the softness,
+# and the same carries slide 0.03 mm. It costs ~50% more time per physics step.
 NOSLIP_ITERATIONS: Final = 10
+
+# Sliding friction on every surface. PLA jaws on a lacquered piece and a felted base on a board
+# both sit around 0.3-0.5; MuJoCo's default of 1.0 is rubber on wood.
+CONTACT_FRICTION: Final = 0.4
+
+# Contact softness between the jaw faces and a piece. At MuJoCo's defaults the faces sink ~2.5 mm
+# into a 10 mm head and the overlap sets the squeeze (~6 N with the servo at ~0.2 N·m), so a jaw
+# command just past contact grips as weakly as the overlap it leaves. At this time constant, the
+# smallest the 2 ms step resolves stably, and this impedance the faces stop within ~0.3 mm of
+# the surface and the squeeze is whatever the servo produces: the torque limit, from any command
+# that closes past the piece.
+GRIP_CONTACT_SOLREF: Final = (0.004, 1.0)
+GRIP_CONTACT_SOLIMP: Final = (0.95, 0.99, 0.0005, 0.5, 2.0)
+
+# Share of the vendored gripper torque the servo is allowed, as LeRobot sets the SO-101's gripper
+# (`Max_Torque_Limit` 500 of 1000) to keep a stalled grip from burning the motor out. A stalled
+# grip on a pawn squeezes ~47 N in total at this limit.
+GRIPPER_TORQUE_FRACTION: Final = 0.5
 
 
 def _radius_at(geom: _PieceGeom, height: float) -> float:
@@ -945,6 +963,8 @@ def _add_piece(
             quat=list(geom.quat),
             mass=geom.mass,
             rgba=list(rgba),
+            solref=list(GRIP_CONTACT_SOLREF),
+            solimp=list(GRIP_CONTACT_SOLIMP),
         )
     return body
 
@@ -1021,6 +1041,8 @@ def _slab_collision_mesh(
             meshname=name,
             group=COLLISION_GROUP,
             mass=0.0,
+            solref=list(GRIP_CONTACT_SOLREF),
+            solimp=list(GRIP_CONTACT_SOLIMP),
         )
     spec.delete(vendored)
 
@@ -1078,6 +1100,8 @@ def build_scene(desc: SceneDescription) -> tuple[mujoco.MjModel, SceneIndex]:
     spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
     spec.option.impratio = FRICTION_IMPEDANCE_RATIO
     spec.option.noslip_iterations = NOSLIP_ITERATIONS
+    gripper_actuator = spec.actuator(GRIPPER_JOINT_NAME)
+    gripper_actuator.forcerange = GRIPPER_TORQUE_FRACTION * np.asarray(gripper_actuator.forcerange)
     _split_hand_collision(spec)
     _add_pinch_site(spec, desc.pinch_offset)
 
@@ -1150,6 +1174,8 @@ def build_scene(desc: SceneDescription) -> tuple[mujoco.MjModel, SceneIndex]:
         fovy=mount.fovy,
     )
 
+    for geom in spec.geoms:
+        geom.friction[0] = CONTACT_FRICTION
     model = spec.compile()
     index = _build_scene_index(
         model, board, board_pose, square_geom_names, piece_body_names, desc.arm_qpos

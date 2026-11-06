@@ -5,12 +5,19 @@ import pytest
 from vla_chess.grasp.solver import GRASP_HEIGHT
 from vla_chess.sim.scene import (
     APPROACH_MARGIN,
+    CONTACT_FRICTION,
     DEFAULT_GRIP_RADIUS,
     DEFAULT_PINCH_OFFSET,
     FIXED_FACE_INSET,
     FRICTION_IMPEDANCE_RATIO,
+    GRIP_CONTACT_SOLIMP,
+    GRIP_CONTACT_SOLREF,
     GRIP_SQUEEZE,
+    GRIPPER_BODY_NAME,
+    GRIPPER_TORQUE_FRACTION,
+    MOVING_JAW_BODY_NAME,
     NOSLIP_ITERATIONS,
+    SO101_XML_PATH,
     Board,
     BoardPose,
     PieceColor,
@@ -247,3 +254,37 @@ class TestContactModel:
         model, _ = build_scene(SceneDescription())
         assert NOSLIP_ITERATIONS > 0
         assert model.opt.noslip_iterations == NOSLIP_ITERATIONS
+
+    def test_every_surface_slides_at_the_contact_friction(self) -> None:
+        model, _ = build_scene(SceneDescription())
+        np.testing.assert_allclose(model.geom_friction[:, 0], CONTACT_FRICTION)
+
+    def test_the_jaw_faces_and_the_pieces_collide_stiffly(self) -> None:
+        model, index = build_scene(
+            SceneDescription(pieces=(PiecePlacement("e2", PieceType.PAWN, PieceColor.WHITE),))
+        )
+        hands = {
+            mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
+            for name in (GRIPPER_BODY_NAME, MOVING_JAW_BODY_NAME)
+        }
+        faces = [
+            g
+            for g in range(model.ngeom)
+            if int(model.geom_bodyid[g]) in hands
+            and "_slab" in (mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, g) or "")
+        ]
+        piece = [
+            g for g in range(model.ngeom) if int(model.geom_bodyid[g]) == index.piece_body_id["e2"]
+        ]
+        assert faces and piece
+        for g in faces + piece:
+            np.testing.assert_allclose(model.geom_solref[g], GRIP_CONTACT_SOLREF)
+            np.testing.assert_allclose(model.geom_solimp[g], GRIP_CONTACT_SOLIMP)
+
+    def test_the_gripper_servo_is_held_to_its_torque_fraction(self) -> None:
+        model, index = build_scene(SceneDescription())
+        vendored = mujoco.MjModel.from_xml_path(str(SO101_XML_PATH))
+        np.testing.assert_allclose(
+            model.actuator_forcerange[index.gripper_actuator_id],
+            GRIPPER_TORQUE_FRACTION * vendored.actuator_forcerange[index.gripper_actuator_id],
+        )

@@ -320,6 +320,40 @@ the head as well, hold for 5 s either way. The DART funnel's yield is unchanged:
 kept, 304 of 320 candidates accepted, and 150 of 160 noisy draws placed, against 303 and 154
 without the post-pass. It adds about 50% to a physics step (27 to 41 µs).
 
+## The servo sets the grip force, not the overlap
+
+At MuJoCo's default contact softness (`solref` 0.02, `solimp` 0.9/0.95) the jaw faces sink a
+median 2.5 mm into the pawn during the expert's carry, and that overlap is what squeezes it:
+5.8 N in total, with the gripper servo at 0.21 N·m, a sixteenth of its limit. The jaw sits at its
+commanded angle, so the grip force is decided by how far the command overlaps the piece, and a
+command that only just closes grips only just. A real gripper is the other way round. The jaw
+stalls on a rigid piece and squeezes as hard as the servo allows, from any command past contact.
+
+The jaw faces and the pieces now collide at `solref` 0.004 (twice the 2 ms timestep, the stiffest
+it resolves stably) and `solimp` 0.95/0.99 (`scene.GRIP_CONTACT_SOLREF`, `GRIP_CONTACT_SOLIMP`).
+The gripper servo is held to half its vendored torque (`scene.GRIPPER_TORQUE_FRACTION`), which is
+what LeRobot's SO-101 follower writes to the gripper's `Max_Torque_Limit` to keep a stall from
+burning the motor out. Every surface slides at a friction of 0.4 (`scene.CONTACT_FRICTION`),
+where MuJoCo's default of 1.0 is closer to rubber on wood than to PLA jaws on a lacquered piece.
+
+Over the expert funnel on the 20 trained one-step moves (2 seed slots each, carry frames with the
+piece more than 10 mm up), medians with p10-p90:
+
+| | Defaults | This scene |
+|---|---|---|
+| Candidates accepted | 304 of 320 | 302 of 320 |
+| Jaw faces into the pawn | 2.5 mm (2.1-3.3) | 0.33 mm (0.30-0.36) |
+| Total jaw normal force | 5.8 N (4.8-7.8) | 47 N (41-49) |
+| Gripper torque | 0.21 N·m | 1.68 N·m, the limit |
+| Pawn slides in the hand, p90 | 1.3 mm | 0.23 mm |
+
+Each change was also run on its own. Friction 0.4 alone leaves the overlap and the force where they
+were. Stiff contacts alone saturate the servo at its full 3.35 N·m, about 97 N, and at friction
+1.0 the funnel then accepts only 250 of 320. The jaws bear on the stem about 27 mm up the pawn
+under both contact models. The head takes 7% of the jaw force at the defaults and none here.
+Noslip is still needed. Without it the pawn slides a median 0.14 mm in the hand over the carry,
+against 0.03 mm with it.
+
 ## The episode that works
 
 805 control steps, 16.1 s, 161 frames, no aborts. Maximum tracking error 0.0082 rad, maximum IK
