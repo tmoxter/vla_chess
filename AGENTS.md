@@ -135,9 +135,10 @@ expected to move to see them.
   offset moves the pose it measures at), so iterate until it stops moving. Anything asking what
   the real hand would hit — `collision.piece_clearance`, occlusion in `survey.framing` — reads
   the visual geoms instead. See `docs/trajectory.md`.
-- **The jaws close on the widest thing between the fingers.** Not on whatever the TCP sits
+- **Size the grip to the widest thing between the fingers.** Not to whatever the TCP sits
   beside: the fingers span 8 mm below the TCP to 26 mm above it, and a pawn's head is inside
-  that band and wider than its stem. Use `scene.grip_radius`.
+  that band and wider than its stem, so the hand has to clear it. Use `scene.grip_radius`. The
+  faces converge toward their tips and bear on the stem regardless; see `docs/trajectory.md`.
 - **There is exactly one board pose: `scene.DEFAULT_BOARD_POSE` (x = 0.300).** Everything
   solved against the board — the reference grasps above all — is solved against it, and a
   second board distance has already been in this tree once: reference poses from one distance

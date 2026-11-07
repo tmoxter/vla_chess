@@ -254,19 +254,31 @@ fingers held nothing. The hand is now collided as slabs of its own meshes, the t
 to under a millimetre, and the constants are re-measured against that; see *The hand that grips
 is not the hand that is drawn* below. What survives from here is the method, not the figures.
 
-## The jaws bear on the head, not on the stem
+## The grip is sized to the head and bears on the stem
 
-The fingers reach 8 mm below the TCP and 26 mm above it. A pawn's head — a 10 mm sphere at 42 mm,
-1 mm wider than the 9 mm stem the TCP sits beside — stands inside that band, so the faces close
-on the head first and the stem never gets touched. A sphere between two flat faces is two point
-contacts: correctly sized to the head, with 2 mm of squeeze, the pinch held the pawn through the
-lift and rolled it out during the transport.
+The fingers reach 8 mm below the TCP and 26 mm above it. With the TCP at the 25 mm grasp height,
+a pawn's head (a 10 mm sphere at 42 mm, 1 mm wider than the 9 mm stem) stands inside that band.
+The hand has to clear the head on the way down, so `scene.grip_radius` is the widest radius the
+piece presents *where the fingers are*, not the radius at the TCP's own height. The grip command
+closes `GRIP_SQUEEZE` (4 mm) inside that radius, and the pinch offset is set from the same radius.
+That is why the offset is per piece and lives on the scene: it is a piece property, and one site
+sized for the whole set puts a pawn 4 mm off the middle of the jaws.
 
-`scene.grip_radius` is therefore the widest radius the piece presents *where the fingers are*,
-not the radius at the TCP's own height, and `GRIP_SQUEEZE` is 4 mm — two of them spent reaching
-the stem past the head, the rest the squeeze proper. This is why the pinch offset is per piece
-and lives on the scene: it is a piece property, and one site sized for the whole set puts a
-pawn 4 mm off the middle of the jaws.
+The head still does not take the grip. The jaw faces converge toward their tips, so each sits
+about 2 mm further from the pawn's axis at the head's height than where it meets the stem.
+Measured over the expert's held carries on the 20 trained one-step moves (medians):
+
+| | Fixed finger | Moving jaw |
+|---|---|---|
+| Into the stem | 0.33 mm | 0.29 mm |
+| Clear of the head | 1.0 mm | 1.2 mm |
+| Height of the stem contact above the base | 28 mm | 27 mm |
+
+The pawn hangs 2.4 degrees off the gripper's axis, too little to account for the gap. Both faces
+bear on the stem near its top, and the squeeze carries them past the head's radius to get there.
+A sphere between two flat faces would be two point contacts. Earlier measurements had the head
+taking the grip and rolling out of it, but those were taken against the hull-collided hand, before
+*The hand that grips is not the hand that is drawn* below.
 
 ## Only one finger moves
 

@@ -572,17 +572,16 @@ JAW_GAP_TABLE: Final = (
 )
 
 # The fingers' own extent along the piece's axis, relative to the TCP: they reach 8 mm below it
-# and 26 mm above. A piece is gripped by whatever it presents in that band, which is why
-# `grip_radius` is not a stem radius — on a pawn the head (10 mm) is wider than the stem (9 mm)
-# and stands inside the band, so the faces bear on the head first.
+# and 26 mm above. The hand has to clear whatever a piece presents in that band, which is why
+# `grip_radius` is not a stem radius: on a pawn the head (10 mm) is wider than the stem (9 mm)
+# and stands inside the band.
 FINGER_BAND: Final = (-0.008, 0.026)
 
-# How far past first contact a grip closes. Two of these four millimetres are spent reaching
-# the stem past a head that is 1 mm wider on each side; the rest is the squeeze proper. At
-# 2 mm the pinch holds only the head — two point contacts on a sphere — and the piece rolls out
-# under the lift. The squeeze sets where the jaws are commanded to, not how hard they grip: once
-# the faces stop on the piece the servo stalls at its torque limit (`GRIPPER_TORQUE_FRACTION`),
-# whatever the command past contact.
+# How far inside `grip_radius` a grip closes. The jaw faces converge toward their tips, so on a
+# pawn they bear on the stem about 27 mm up while the head stands ~1 mm clear of each; the
+# squeeze carries them past the head's radius onto the stem. It sets where the jaws are
+# commanded to, not how hard they grip: once the faces stop on the piece the servo stalls at
+# its torque limit (`GRIPPER_TORQUE_FRACTION`), whatever the command past contact.
 GRIP_SQUEEZE: Final = 0.004
 
 # Slack in the opening the hand approaches and leaves a piece at, over what the piece and its
@@ -610,7 +609,7 @@ NOSLIP_ITERATIONS: Final = 10
 CONTACT_FRICTION: Final = 0.4
 
 # Contact softness between the jaw faces and a piece. At MuJoCo's defaults the faces sink ~2.5 mm
-# into a 10 mm head and the overlap sets the squeeze (~6 N with the servo at ~0.2 N·m), so a jaw
+# into a pawn and the overlap sets the squeeze (~6 N with the servo at ~0.2 N·m), so a jaw
 # command just past contact grips as weakly as the overlap it leaves. At this time constant, the
 # smallest the 2 ms step resolves stably, and this impedance the faces stop within ~0.3 mm of
 # the surface and the squeeze is whatever the servo produces: the torque limit, from any command
@@ -655,8 +654,9 @@ def _radius_at(geom: _PieceGeom, height: float) -> float:
 def grip_radius(piece_type: PieceType, tcp_height: float) -> float:
     """Measure the widest radius a piece presents where the fingers are.
 
-    The jaws close on the widest thing between them, not on the part the TCP happens to sit
-    beside, so this is what every jaw command and the pinch offset are sized from.
+    The hand has to clear the widest thing between the fingers, not only the part the TCP
+    happens to sit beside, so this is what every jaw command and the pinch offset are sized
+    from.
 
     Args:
         piece_type: Piece to measure.
@@ -687,7 +687,7 @@ def pinch_offset_for(radius: float) -> float:
     """Place the pinch site for the piece the hand is built to lift.
 
     Args:
-        radius: Radius in metres the jaws will bear on, from `grip_radius`.
+        radius: Widest radius in metres the piece presents to the fingers, from `grip_radius`.
 
     Returns:
         Offset in metres along the closing axis from the gripper frame, positioned so the
@@ -748,13 +748,13 @@ def grip_command(radius: float, joint_range: tuple[float, float]) -> float:
     """Size the jaw command that grips a piece.
 
     Args:
-        radius: Radius in metres the jaws bear on, from `grip_radius`.
+        radius: Widest radius in metres the piece presents to the fingers, from `grip_radius`.
         joint_range: Lower and upper gripper joint angles in radians the command is
             normalised against.
 
     Returns:
-        Command on the [0, 100] closed-to-open scale, closing `GRIP_SQUEEZE` past first
-        contact rather than driving to the mechanical stop.
+        Command on the [0, 100] closed-to-open scale, closing `GRIP_SQUEEZE` inside
+        `radius` rather than driving to the mechanical stop.
 
     Raises:
         ValueError: If that opening is outside the measured jaw range.
@@ -774,7 +774,7 @@ def ready_command(radius: float, standoff: float, joint_range: tuple[float, floa
     the nearest neighbour's stem is 34 mm away.
 
     Args:
-        radius: Radius in metres the jaws bear on, from `grip_radius`.
+        radius: Widest radius in metres the piece presents to the fingers, from `grip_radius`.
         standoff: How far in metres the piece sits off the pinch axis on the descent, paid
             for on the fixed side.
         joint_range: Lower and upper gripper joint angles in radians the command is
