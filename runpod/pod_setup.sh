@@ -3,7 +3,8 @@ set -euo pipefail
 
 # Pod-side one-shot setup: build a clean Python 3.12 env with CUDA torch and
 # lerobot[smolvla], authenticate `hf`, then launch training in a tmux session — or, with
-# LAUNCH=dagger, a whole DAgger round (runpod/dagger_round.sh from the repo synced to POD_REPO).
+# LAUNCH=dagger, a whole DAgger round (runpod/dagger_round.sh from the repo synced to POD_REPO), or
+# with LAUNCH=baseline, a policy's baseline (runpod/baseline.sh, likewise).
 # Needs HF_TOKEN unless training reads a dataset already on disk (DATASET_ROOT) and pushes nothing
 # (HUB_PUSH=false); WANDB_API_KEY is optional.
 
@@ -26,8 +27,8 @@ echo ">> install uv"
 curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="${HOME}/.local/bin:${PATH}"
 
-echo ">> create py3.12 venv at ${VENV}"
-uv venv --python 3.12 "${VENV}"
+echo ">> create py3.12 venv at ${VENV} (kept if it exists, so a second launch reuses it)"
+uv venv --python 3.12 --allow-existing "${VENV}"
 
 echo ">> install CUDA torch stack from ${CUDA_INDEX}"
 uv pip install --python "${VENV}/bin/python" \
@@ -60,6 +61,16 @@ if [[ "${LAUNCH:-train}" == "dagger" ]]; then
     "VENV='${VENV}' bash '${POD_REPO}/runpod/dagger_round.sh' 2>&1 | tee /root/dagger.log"
   echo ">> round started. Attach with:  tmux attach -t ${TMUX_SESSION}"
   echo ">> tail the log with:           tail -f /root/dagger.log"
+  exit 0
+fi
+
+if [[ "${LAUNCH:-train}" == "baseline" ]]; then
+  POD_REPO="${POD_REPO:-/workspace/vla_chess}"
+  echo ">> launch the baseline in tmux session '${TMUX_SESSION}'"
+  tmux new-session -d -s "${TMUX_SESSION}" \
+    "bash '${POD_REPO}/runpod/baseline.sh' 2>&1 | tee /root/baseline.log"
+  echo ">> baseline started. Attach with:  tmux attach -t ${TMUX_SESSION}"
+  echo ">> tail the log with:              tail -f /root/baseline.log"
   exit 0
 fi
 
