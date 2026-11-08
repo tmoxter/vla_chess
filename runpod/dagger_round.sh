@@ -34,26 +34,39 @@ CARRY_LEAD="${CARRY_LEAD:-45}"
 CARRY_PER_TIER="${CARRY_PER_TIER:-3}"
 RELEASE_LEAD="${RELEASE_LEAD:-30}"
 # One takeover shard per CPU the container may use, as far as its memory allows: nproc reports
-# the host's cores, while the cgroup quotas are what the shards actually get. A shard holds a
-# whole rollout's snapshots and a renderer, about 2 GB resident.
+# the host's cores, while the cgroup quotas are what the shards actually get. Containers expose
+# the quotas through cgroup v2 (cpu.max, memory.max) or v1 (cpu.cfs_quota_us, memory.limit_in_bytes,
+# where -1 and a near-2^63 limit mean unlimited). A shard holds a whole rollout's snapshots and a
+# renderer, about 2 GB resident.
 SHARD_MEM_GB="${SHARD_MEM_GB:-3}"
 cpu_quota() {
   local quota period
   if [[ -r /sys/fs/cgroup/cpu.max ]] && read -r quota period </sys/fs/cgroup/cpu.max \
       && [[ "${quota}" != "max" ]]; then
-    echo $(( quota / period > 0 ? quota / period : 1 ))
+    :
+  elif [[ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]] \
+      && read -r quota </sys/fs/cgroup/cpu/cpu.cfs_quota_us && [[ "${quota}" != "-1" ]] \
+      && read -r period </sys/fs/cgroup/cpu/cpu.cfs_period_us; then
+    :
   else
     nproc
+    return
   fi
+  echo $(( quota / period > 0 ? quota / period : 1 ))
 }
 memory_shards() {
-  local limit
+  local limit host
+  host=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) * 1024 ))
   if [[ -r /sys/fs/cgroup/memory.max ]] && read -r limit </sys/fs/cgroup/memory.max \
       && [[ "${limit}" != "max" ]]; then
-    echo $(( limit / (SHARD_MEM_GB * 1024 ** 3) > 0 ? limit / (SHARD_MEM_GB * 1024 ** 3) : 1 ))
+    :
+  elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]] \
+      && read -r limit </sys/fs/cgroup/memory/memory.limit_in_bytes && (( limit < host )); then
+    :
   else
-    echo $(( $(awk '/MemTotal/ {print $2}' /proc/meminfo) / (SHARD_MEM_GB * 1024 ** 2) ))
+    limit="${host}"
   fi
+  echo $(( limit / (SHARD_MEM_GB * 1024 ** 3) > 0 ? limit / (SHARD_MEM_GB * 1024 ** 3) : 1 ))
 }
 cpus="$(cpu_quota)"
 fits="$(memory_shards)"
