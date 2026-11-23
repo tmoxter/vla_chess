@@ -68,6 +68,7 @@ src/vla_chess/
   control/     planner (move -> waypoints) and executor (waypoints -> simulated motion)
   sensor/      what the policy sees: offscreen rendering
   dataset/     episode recording and training-trajectory production
+  rl/          reinforcement learning on the scene: the chunk-stepped move env and DSRL steering
   viz/         output for humans: contact sheets, captions, video
   analysis/    instrumentation: benchmarks, probes and the reports under docs/
   cli/         argparse shells; no logic worth testing lives here
@@ -75,9 +76,9 @@ src/vla_chess/
 
 Imports point **down** this list and never back up: `sim` imports nothing else in the package,
 `grasp` and `sensor` build on `sim`, `control` on `sim` + `grasp`, `dataset` on everything above
-it. `viz`, `analysis` and `cli` sit outside the stack and may import anything. If a change needs
-an edge that points up, the module is in the wrong package — move it rather than adding the
-import. This is a convention, not a lint rule; `import-linter` can enforce it later if it drifts.
+it, and `rl` on everything above it again. `viz`, `analysis` and `cli` sit outside the stack and
+may import anything. If a change needs an edge that points up, the module is in the wrong
+package — move it rather than adding the import. This is a convention, not a lint rule; `import-linter` can enforce it later if it drifts.
 
 A CLI is argparse plus wiring. The function it calls must be importable and testable without
 argparse — if you find yourself testing a CLI, the logic is in the wrong tier.

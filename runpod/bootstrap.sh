@@ -22,6 +22,7 @@ set -euo pipefail
 #                               instead of train.sh; needs SYNC_REPO=1. The ENV_FILE is copied to
 #                               /root/run.env for it to read its knobs from.
 #   LAUNCH=baseline             run runpod/baseline.sh the same way.
+#   LAUNCH=dsrl                 run runpod/dsrl.sh the same way.
 #
 # End-to-end plumbing smoke test (datagen -> push -> train -> checkpoint push), one command:
 #   DATAGEN=1 ENV_FILE=runpod/smoke.env ./runpod/bootstrap.sh <ssh_host> <ssh_port>
@@ -81,7 +82,7 @@ if [[ -n "${POLICY_LOCAL:-}" ]]; then
     exit 1
   fi
 fi
-if [[ "${LAUNCH:-train}" =~ ^(dagger|baseline)$ && "${SYNC_REPO:-0}" != "1" ]]; then
+if [[ "${LAUNCH:-train}" =~ ^(dagger|baseline|dsrl)$ && "${SYNC_REPO:-0}" != "1" ]]; then
   echo "FATAL: LAUNCH=${LAUNCH} runs from the synced repo; set SYNC_REPO=1." >&2
   exit 1
 fi

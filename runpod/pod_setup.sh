@@ -4,7 +4,8 @@ set -euo pipefail
 # Pod-side one-shot setup: build a clean Python 3.12 env with CUDA torch and
 # lerobot[smolvla], authenticate `hf`, then launch training in a tmux session — or, with
 # LAUNCH=dagger, a whole DAgger round (runpod/dagger_round.sh from the repo synced to POD_REPO), or
-# with LAUNCH=baseline, a policy's baseline (runpod/baseline.sh, likewise).
+# with LAUNCH=baseline, a policy's baseline (runpod/baseline.sh, likewise), or with LAUNCH=dsrl, a
+# DSRL steering run (runpod/dsrl.sh, likewise).
 # Needs HF_TOKEN unless training reads a dataset already on disk (DATASET_ROOT) and pushes nothing
 # (HUB_PUSH=false); WANDB_API_KEY is optional.
 
@@ -71,6 +72,16 @@ if [[ "${LAUNCH:-train}" == "baseline" ]]; then
     "bash '${POD_REPO}/runpod/baseline.sh' 2>&1 | tee /root/baseline.log"
   echo ">> baseline started. Attach with:  tmux attach -t ${TMUX_SESSION}"
   echo ">> tail the log with:              tail -f /root/baseline.log"
+  exit 0
+fi
+
+if [[ "${LAUNCH:-train}" == "dsrl" ]]; then
+  POD_REPO="${POD_REPO:-/workspace/vla_chess}"
+  echo ">> launch the DSRL run in tmux session '${TMUX_SESSION}'"
+  tmux new-session -d -s "${TMUX_SESSION}" \
+    "bash '${POD_REPO}/runpod/dsrl.sh' 2>&1 | tee /root/dsrl.log"
+  echo ">> run started. Attach with:  tmux attach -t ${TMUX_SESSION}"
+  echo ">> tail the log with:         tail -f /root/dsrl.log"
   exit 0
 fi
 

@@ -70,6 +70,7 @@ from vla_chess.dataset.episode import (
 from vla_chess.dataset.observe import DEFAULT_FPS
 from vla_chess.dataset.rollouts import RecordedRollout, rollout_path, save_rollout
 from vla_chess.dataset.takeover import HIGH_RELEASE, GripTrace, mid_air_releases
+from vla_chess.rl.env import LIFT_CLEARANCE_M
 from vla_chess.sensor.render import Renderer
 from vla_chess.sim.positions import single_pawn_position
 from vla_chess.sim.scene import (
@@ -113,11 +114,6 @@ def _load_local(mdir: str, device: str) -> tuple[Any, Any, Any]:
     )
     return policy, pre, post
 
-
-# How far above the board surface the piece must rise, while both jaws bear on it, to count the
-# grasp as a *lift* rather than a jaws-closed-but-piece-still-grounded touch. One centimetre clears
-# the settle tolerance so a piece merely nudged on its square is not read as lifted.
-LIFT_CLEARANCE_M = 0.01
 
 # Points the policy and expert trajectories are resampled to on a shared normalized time axis
 # before they are compared, so a 30 fps rollout and a differently-lengthed expert trace line up
