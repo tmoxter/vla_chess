@@ -5,7 +5,9 @@ move and reports rates with confidence intervals. It separates the two things th
 been conflating:
 
   * **grasp** — did the policy ever close both jaws on the piece (and lift it), and
-  * **placement** — did the piece come to rest, upright, on the target square.
+  * **placement** — did the piece come to rest, upright, on the target square, and
+  * **placement at done** — was it standing there when the arm, having let go of it, came back
+    to rest (`control.done`): the score a deployment without a fixed episode length would get.
 
 and it measures **trajectory displacement** of each policy rollout against the scripted expert's
 trajectory for the same move (joint-space and TCP-space, plus terminal piece error).
@@ -59,6 +61,7 @@ from vla_chess.cli.eval_rollout import (
     substeps_per_frame,
 )
 from vla_chess.cli.generate_dataset import EXP2_TRAINED_MOVES, one_step_moves
+from vla_chess.control.done import DoneDetector
 from vla_chess.control.executor import Executor
 from vla_chess.control.planner import MoveSpec
 from vla_chess.dataset.episode import (
@@ -143,6 +146,8 @@ class RolloutMetrics:
     joint_disp_max: float
     tcp_disp_mean: float  # mean per-sample TCP L2 vs expert (m)
     tcp_disp_max: float
+    done_frame: int | None  # frame the move became done on by `control.done`, None if never
+    placed_at_done: bool  # the piece stood on the target, released, on that frame
 
 
 def wilson_interval(successes: int, total: int, z: float = 1.96) -> tuple[float, float, float]:
@@ -310,6 +315,8 @@ def _drive_once(
     heights: list[float] = []
     jaw_commands: list[float] = []
     grasped = lifted = False
+    done = DoneDetector()
+    placed_at_done = False
     for _ in range(max_frames):
         if record is not None:
             snapshots.append(capture_state(model, data))
@@ -332,6 +339,8 @@ def _drive_once(
             grasped = True
             if height > LIFT_CLEARANCE_M:
                 lifted = True
+        if done.done_frame is None and done.update(executor._arm_qpos(data), holding):
+            placed_at_done = bool(executor.placement(data, spec.source, spec.target).placed)
 
     releases = mid_air_releases(
         GripTrace(
@@ -388,6 +397,8 @@ def _drive_once(
         joint_disp_max=float(joint_l2.max()),
         tcp_disp_mean=float(tcp_l2.mean()),
         tcp_disp_max=float(tcp_l2.max()),
+        done_frame=done.done_frame,
+        placed_at_done=placed_at_done,
     )
 
 
@@ -526,6 +537,8 @@ def run_policy_sweep(args: argparse.Namespace) -> dict[str, Any]:
     place_p, place_lo, place_hi = wilson_interval(sum(r.placed for r in records), n)
     opened_p, opened_lo, opened_hi = wilson_interval(sum(r.opened_mid_air for r in records), n)
     slipped_p, slipped_lo, slipped_hi = wilson_interval(sum(r.slipped_mid_air for r in records), n)
+    done_p, done_lo, done_hi = wilson_interval(sum(r.done_frame is not None for r in records), n)
+    at_done_p, at_done_lo, at_done_hi = wilson_interval(sum(r.placed_at_done for r in records), n)
 
     def summary(values: list[float]) -> dict[str, float]:
         a = np.asarray(values)
@@ -542,13 +555,21 @@ def run_policy_sweep(args: argparse.Namespace) -> dict[str, Any]:
     for r in records:
         tally = per_move.setdefault(
             r.move,
-            {"rollouts": 0, "grasped": 0, "lifted": 0, "placed": 0, "opened_mid_air": 0},
+            {
+                "rollouts": 0,
+                "grasped": 0,
+                "lifted": 0,
+                "placed": 0,
+                "opened_mid_air": 0,
+                "placed_at_done": 0,
+            },
         )
         tally["rollouts"] += 1
         tally["grasped"] += int(r.grasped)
         tally["lifted"] += int(r.lifted)
         tally["placed"] += int(r.placed)
         tally["opened_mid_air"] += int(r.opened_mid_air)
+        tally["placed_at_done"] += int(r.placed_at_done)
 
     return {
         "mode": "policy_sweep",
@@ -572,6 +593,10 @@ def run_policy_sweep(args: argparse.Namespace) -> dict[str, Any]:
         "placement_rate": {"p": place_p, "ci95": [place_lo, place_hi]},
         "opened_mid_air_rate": {"p": opened_p, "ci95": [opened_lo, opened_hi]},
         "slipped_mid_air_rate": {"p": slipped_p, "ci95": [slipped_lo, slipped_hi]},
+        # A move is done once the arm let go and came back to rest (`control.done`); scored there,
+        # a move that never got done within max_frames is a failure, as it would be on the arm.
+        "done_rate": {"p": done_p, "ci95": [done_lo, done_hi]},
+        "placement_at_done_rate": {"p": at_done_p, "ci95": [at_done_lo, at_done_hi]},
         "terminal_to_target_m": summary([r.terminal_to_target_m for r in records]),
         "joint_disp_mean_rad": summary([r.joint_disp_mean for r in records]),
         "tcp_disp_mean_m": summary([r.tcp_disp_mean for r in records]),
@@ -734,9 +759,11 @@ def main() -> None:
         )
     else:
         g, p = report["grasp_rate"], report["placement_rate"]
+        d = report["placement_at_done_rate"]
         print(
             f"=== grasp {g['p']:.1%} (95% CI {g['ci95'][0]:.1%}-{g['ci95'][1]:.1%}) | "
-            f"placement {p['p']:.1%} (95% CI {p['ci95'][0]:.1%}-{p['ci95'][1]:.1%}) "
+            f"placement {p['p']:.1%} (95% CI {p['ci95'][0]:.1%}-{p['ci95'][1]:.1%}) | "
+            f"placement at done {d['p']:.1%} (95% CI {d['ci95'][0]:.1%}-{d['ci95'][1]:.1%}) "
             f"over {report['rollouts']} rollouts ===",
             flush=True,
         )

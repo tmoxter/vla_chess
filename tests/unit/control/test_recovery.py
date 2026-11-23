@@ -4,13 +4,15 @@ import mujoco
 import numpy as np
 import pytest
 
-from vla_chess.control.executor import TILTED_IK_ABORT, ExecutionResult, Executor
-from vla_chess.control.planner import MoveSpec, Phase
+from vla_chess.control.executor import CONTROL_HZ, TILTED_IK_ABORT, ExecutionResult, Executor
+from vla_chess.control.planner import MoveSpec, Phase, Plan
 from vla_chess.control.recovery import (
+    AT_REST,
     Assessment,
     NotNearTarget,
     Situation,
     assess,
+    hold_at_rest,
     plan_recovery,
     recovery_candidates,
 )
@@ -200,3 +202,56 @@ def test_a_piece_pushed_off_its_square_centre_is_grasped_where_it_stands(run: Ru
     assert run.assess(data).situation is Situation.TO_GRASP
     result = run.recover(data, direct=False)
     assert result.succeeded
+
+
+def _placed_plan(run: Run) -> Plan:
+    data = run.state(run.middle_of(Phase.RETREAT))
+    assessment = run.assess(data)
+    candidate = recovery_candidates(MOVE, assessment.situation, SampleKnobs(), 0)[0]
+    scratch = make_data(run.model, run.index)
+    return plan_recovery(
+        candidate,
+        assessment,
+        run.model,
+        scratch,
+        run.index,
+        VerticalGraspSolver(run.model, scratch, run.index),
+        MAX_TILT_DEG,
+    )
+
+
+def test_a_hold_at_rest_adds_a_still_leg_after_the_return(run: Run) -> None:
+    plan = _placed_plan(run)
+    held = hold_at_rest(plan, 1.0)
+    assert held.waypoints[:-1] == plan.waypoints
+    last = held.waypoints[-1]
+    assert last.phase is Phase.SURVEY_END
+    assert last.duration == 1.0
+    assert last.qpos == plan.waypoints[-1].qpos
+    assert last.gripper == plan.waypoints[-1].gripper
+
+
+def test_a_held_return_stays_at_rest_for_the_hold(run: Run) -> None:
+    plan = _placed_plan(run)
+    plain = run.executor.run(
+        run.state(run.middle_of(Phase.RETREAT)), plan, ik_abort=TILTED_IK_ABORT
+    )
+    held = run.executor.run(
+        run.state(run.middle_of(Phase.RETREAT)), hold_at_rest(plan, 1.0), ik_abort=TILTED_IK_ABORT
+    )
+    assert held.abort_reason is None
+    assert held.placed
+    extra = len(held.states) - len(plain.states)
+    assert extra == pytest.approx(CONTROL_HZ, abs=2)
+    tail = held.states[-extra:, :5]
+    assert np.abs(tail - np.asarray(BIRDS_EYE_ARM_QPOS)).max() < AT_REST
+
+
+def test_no_hold_leaves_the_plan_as_it_is(run: Run) -> None:
+    plan = _placed_plan(run)
+    assert hold_at_rest(plan, 0.0) is plan
+
+
+def test_a_negative_hold_is_rejected(run: Run) -> None:
+    with pytest.raises(ValueError):
+        hold_at_rest(_placed_plan(run), -1.0)

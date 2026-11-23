@@ -5,7 +5,8 @@ set -euo pipefail
 # recording every frame's simulator state; let the scripted expert take those rollouts over and
 # keep the recoveries that place the pawn; merge them with the datasets trained on so far; fine-tune
 # the policy on the union; evaluate it with the standard d7->d6 sweep and, when SWEEP_ROLLOUTS is
-# set, again over the trained one-step moves the round's rollouts drove. Every step is skipped when
+# set, again over the trained one-step moves the round's rollouts drove; when BASELINE_ROLLOUTS is
+# set, score the starting policy on d7->d6 with the same eval build. Every step is skipped when
 # its output already exists, so rerunning the script resumes the round. Prints DAGGER_EXIT_<code>
 # at the end for polling.
 #
@@ -28,11 +29,14 @@ PER_ROLLOUT="${PER_ROLLOUT:-2}"
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-8}"
 # random: take over at any frame; carry: up to CARRY_PER_TIER held frames from the last
 # CARRY_LEAD before a mid-air release, then up to CARRY_PER_TIER other held frames, then the rest;
-# release: only the last RELEASE_LEAD held frames before the jaws were opened in mid-air.
-FRAME_ORDER="${FRAME_ORDER:?set FRAME_ORDER to random, carry or release}"
+# release: only the last RELEASE_LEAD held frames before the jaws were opened in mid-air;
+# placed: only frames after the pawn was placed and before the arm was back at rest.
+FRAME_ORDER="${FRAME_ORDER:?set FRAME_ORDER to random, carry, release or placed}"
 CARRY_LEAD="${CARRY_LEAD:-45}"
 CARRY_PER_TIER="${CARRY_PER_TIER:-3}"
 RELEASE_LEAD="${RELEASE_LEAD:-30}"
+# Seconds every takeover holds the arm still at rest after flying home.
+REST_HOLD="${REST_HOLD:-0}"
 # One takeover shard per CPU the container may use, as far as its memory allows: nproc reports
 # the host's cores, while the cgroup quotas are what the shards actually get. Containers expose
 # the quotas through cgroup v2 (cpu.max, memory.max) or v1 (cpu.cfs_quota_us, memory.limit_in_bytes,
@@ -78,6 +82,8 @@ BATCH_SIZE="${BATCH_SIZE:-32}"
 EVAL_ROLLOUTS="${EVAL_ROLLOUTS:-1000}"
 # Rollouts of the trained policy over the trained one-step moves, to compare with step 1's; 0 skips.
 SWEEP_ROLLOUTS="${SWEEP_ROLLOUTS:-0}"
+# d7->d6 rollouts of the starting policy, scored by the same eval build as the trained one; 0 skips.
+BASELINE_ROLLOUTS="${BASELINE_ROLLOUTS:-0}"
 DATASET_REPO_ID="${DATASET_REPO_ID:-vla_chess/dagger}"
 POLICY_REPO_ID="${POLICY_REPO_ID:-vla_chess/smolvla-dagger}"
 JOB_NAME="${JOB_NAME:-$(basename "${ROUND_DIR}")}"
@@ -96,7 +102,7 @@ if [[ ! -x "${EVAL_VENV}/bin/python" ]]; then
 fi
 PY="${EVAL_VENV}/bin/python"
 
-step "1/6 policy rollouts with state recording (${ROLLOUTS} over the trained one-step moves)"
+step "1/7 policy rollouts with state recording (${ROLLOUTS} over the trained one-step moves)"
 if [[ ! -f "${ROUND_DIR}/rollouts.json" ]]; then
   "${PY}" -m vla_chess.cli.eval_metrics --local-checkpoint "${POLICY_IN}" --trained-one-step \
     --fps 30 --n-action-steps "${N_ACTION_STEPS}" --rollouts "${ROLLOUTS}" --workers "${WORKERS}" \
@@ -106,13 +112,13 @@ else
   echo "   done already"
 fi
 
-step "2/6 expert takeovers over ${SHARDS} shards (${PER_ROLLOUT} per rollout, ${FRAME_ORDER} frame order)"
+step "2/7 expert takeovers over ${SHARDS} shards (${PER_ROLLOUT} per rollout, ${FRAME_ORDER} frame order)"
 if [[ ! -f "${ROUND_DIR}/takeovers/meta/info.json" ]]; then
   common=(--rollouts "${ROUND_DIR}/rollouts" --captures "${ROUND_DIR}/takeover-captures"
           --per-rollout "${PER_ROLLOUT}" --max-attempts "${MAX_ATTEMPTS}"
           --frame-order "${FRAME_ORDER}" --carry-lead "${CARRY_LEAD}"
           --carry-per-tier "${CARRY_PER_TIER}" --release-lead "${RELEASE_LEAD}"
-          --fps 30 --seed "${SEED}")
+          --rest-hold "${REST_HOLD}" --fps 30 --seed "${SEED}")
   mkdir -p "${ROUND_DIR}/takeover-logs"
   pids=()
   for ((i = 0; i < SHARDS; i++)); do
@@ -129,7 +135,7 @@ else
   echo "   done already"
 fi
 
-step "3/6 merge ${BASE_DATASETS} + this round's takeovers"
+step "3/7 merge ${BASE_DATASETS} + this round's takeovers"
 if [[ ! -f "${ROUND_DIR}/train-dataset/meta/info.json" ]]; then
   # shellcheck disable=SC2086
   "${PY}" -m vla_chess.cli.merge_datasets --out "${ROUND_DIR}/train-dataset" \
@@ -140,7 +146,7 @@ fi
 
 final_step="$(printf '%06d' "${STEPS}")"
 CHECKPOINT="${ROUND_DIR}/train/checkpoints/${final_step}/pretrained_model"
-step "4/6 fine-tune ${POLICY_IN} for ${STEPS} steps"
+step "4/7 fine-tune ${POLICY_IN} for ${STEPS} steps"
 if [[ ! -f "${CHECKPOINT}/model.safetensors" ]]; then
   rm -rf "${ROUND_DIR}/train"
   VENV="${TRAIN_VENV}" POLICY_PATH="${POLICY_IN}" DATASET_REPO_ID="${DATASET_REPO_ID}" \
@@ -152,7 +158,7 @@ else
   echo "   done already"
 fi
 
-step "5/6 eval: d7->d6, ${EVAL_ROLLOUTS} rollouts"
+step "5/7 eval: d7->d6, ${EVAL_ROLLOUTS} rollouts"
 if [[ ! -f "${ROUND_DIR}/eval-d7d6.json" ]]; then
   "${PY}" -m vla_chess.cli.eval_metrics --local-checkpoint "${CHECKPOINT}" --source d7 --target d6 \
     --fps 30 --n-action-steps "${N_ACTION_STEPS}" --rollouts "${EVAL_ROLLOUTS}" \
@@ -161,13 +167,24 @@ else
   echo "   done already"
 fi
 
-step "6/6 sweep: trained one-step moves, ${SWEEP_ROLLOUTS} rollouts"
+step "6/7 sweep: trained one-step moves, ${SWEEP_ROLLOUTS} rollouts"
 if [[ "${SWEEP_ROLLOUTS}" == 0 ]]; then
   echo "   skipped (SWEEP_ROLLOUTS=0)"
 elif [[ ! -f "${ROUND_DIR}/sweep-trained.json" ]]; then
   "${PY}" -m vla_chess.cli.eval_metrics --local-checkpoint "${CHECKPOINT}" --trained-one-step \
     --fps 30 --n-action-steps "${N_ACTION_STEPS}" --rollouts "${SWEEP_ROLLOUTS}" \
     --workers "${WORKERS}" --device cuda --no-reference --out "${ROUND_DIR}/sweep-trained.json"
+else
+  echo "   done already"
+fi
+
+step "7/7 baseline: the starting policy on d7->d6, ${BASELINE_ROLLOUTS} rollouts"
+if [[ "${BASELINE_ROLLOUTS}" == 0 ]]; then
+  echo "   skipped (BASELINE_ROLLOUTS=0)"
+elif [[ ! -f "${ROUND_DIR}/baseline-d7d6.json" ]]; then
+  "${PY}" -m vla_chess.cli.eval_metrics --local-checkpoint "${POLICY_IN}" --source d7 --target d6 \
+    --fps 30 --n-action-steps "${N_ACTION_STEPS}" --rollouts "${BASELINE_ROLLOUTS}" \
+    --workers "${WORKERS}" --device cuda --out "${ROUND_DIR}/baseline-d7d6.json"
 else
   echo "   done already"
 fi

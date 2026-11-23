@@ -23,6 +23,7 @@ from vla_chess.dataset.takeover import (
     TakeoverRunner,
     carry_order,
     mid_air_releases,
+    placed_order,
     recovery_reject_reason,
     release_order,
     take_over_rollout,
@@ -256,6 +257,46 @@ def test_a_finished_move_is_not_taken_over(snapshots: dict[Phase, np.ndarray]) -
     assert outcome.situation is Situation.FINISHED
     assert outcome.episode is None
     assert outcome.attempts == 0
+
+
+def test_the_situation_trace_reads_each_snapshot(snapshots: dict[Phase, np.ndarray]) -> None:
+    runner = TakeoverRunner(pieces=PIECES, fps=10.0)
+    phases = (Phase.APPROACH, Phase.TRANSPORT, Phase.RETREAT, Phase.SURVEY_END)
+    situations = runner.situation_trace(MOVE, np.stack([snapshots[p] for p in phases]))
+    assert situations == [
+        Situation.TO_GRASP,
+        Situation.IN_HAND,
+        Situation.PLACED,
+        Situation.FINISHED,
+    ]
+
+
+def test_placed_order_tries_only_the_placed_frames_past_the_skip() -> None:
+    situations = [Situation.TO_GRASP] * 4 + [Situation.PLACED] * 6 + [Situation.FINISHED] * 3
+    situations[2] = Situation.PLACED
+    order = placed_order(situations, skip=3, rng=np.random.default_rng(0))
+    assert sorted(order) == list(range(4, 10))
+    assert order != sorted(order)
+
+
+def test_placed_order_of_a_rollout_that_never_placed_is_empty() -> None:
+    situations = [Situation.TO_GRASP] * 5 + [Situation.IN_HAND] * 5
+    assert placed_order(situations, skip=0, rng=np.random.default_rng(0)) == []
+
+
+def test_a_takeover_after_placing_flies_home_and_holds_there(
+    snapshots: dict[Phase, np.ndarray],
+) -> None:
+    plain = TakeoverRunner(pieces=PIECES, fps=10.0).run(MOVE, snapshots[Phase.RETREAT])
+    held = TakeoverRunner(pieces=PIECES, fps=10.0, rest_hold=1.0).run(
+        MOVE, snapshots[Phase.RETREAT]
+    )
+    assert plain.situation is Situation.PLACED
+    assert plain.episode is not None and held.episode is not None
+    assert len(held.episode.frames) - len(plain.episode.frames) == pytest.approx(10, abs=1)
+    rest = np.asarray(BIRDS_EYE_ARM_QPOS)
+    tail = np.stack([frame.state[:5] for frame in held.episode.frames[-10:]])
+    assert np.abs(tail - rest).max() < 0.05
 
 
 class StubRunner:

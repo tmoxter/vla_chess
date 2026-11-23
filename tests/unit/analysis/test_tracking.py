@@ -91,6 +91,26 @@ def test_a_multi_move_sweep_also_yields_per_move_rates() -> None:
     assert metrics["sweep/d7_d6/placed_rate"] == 0.0
 
 
+def test_a_sweep_that_scored_at_done_yields_those_rates_too() -> None:
+    report = {
+        "rollouts": 4,
+        "grasp_rate": _rate(0.5),
+        "lift_rate": _rate(0.5),
+        "placement_rate": _rate(0.25),
+        "done_rate": _rate(0.5),
+        "placement_at_done_rate": _rate(0.2),
+        "terminal_to_target_m": {},
+        "per_move": {
+            "c7->c6": {"rollouts": 2, "placed": 1, "placed_at_done": 1},
+            "d7->d6": {"rollouts": 2, "placed": 0, "placed_at_done": 0},
+        },
+    }
+    metrics = policy_sweep_metrics(report, "sweep")
+    assert metrics["sweep/done_rate"] == 0.5
+    assert metrics["sweep/placement_at_done_rate_ci95_hi"] == pytest.approx(0.21)
+    assert metrics["sweep/c7_c6/placed_at_done_rate"] == 0.5
+
+
 def test_a_sweep_that_tracked_mid_air_releases_yields_their_rates() -> None:
     report = {
         "rollouts": 4,

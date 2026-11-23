@@ -29,6 +29,7 @@ from vla_chess.dataset.takeover import (
     TakeoverRunner,
     carry_order,
     mid_air_releases,
+    placed_order,
     release_order,
     take_over_rollout,
     takeover_order,
@@ -36,7 +37,7 @@ from vla_chess.dataset.takeover import (
 from vla_chess.sim.positions import single_pawn_position
 
 MANIFEST_NAME = "takeover-manifest.json"
-FRAME_ORDERS = ("random", "carry", "release")
+FRAME_ORDERS = ("random", "carry", "release", "placed")
 
 
 def _tally_path(captures: Path, rollout: Path) -> Path:
@@ -58,6 +59,7 @@ def take_over(
     fps: float,
     seed: int,
     shard: tuple[int, int],
+    rest_hold: float = 0.0,
 ) -> None:
     """Take over every rollout of this shard that has no tally yet.
 
@@ -70,13 +72,16 @@ def take_over(
         frame_order: "random" tries frames in a random order; "carry" tries the frames
             carrying the piece first, those just before a mid-air release ahead of the rest;
             "release" tries only the held frames just before the jaws were opened on the piece
-            higher than `HIGH_RELEASE`, and leaves a rollout that never did so alone.
+            higher than `HIGH_RELEASE`, and leaves a rollout that never did so alone; "placed"
+            tries only the frames after the piece was placed and before the arm was home, and
+            leaves a rollout that never placed alone.
         carry_lead: Held frames before a mid-air release that "carry" may put first.
         carry_per_tier: Frames each held tier of "carry" puts ahead of the rest.
         release_lead: Held frames before a mid-air opening that "release" may try.
         fps: Capture frame rate of the kept episodes.
         seed: Base seed; rollout `i` shuffles its frames from `[seed, i]`.
         shard: `(i, n)` — take over only the rollouts whose index is `i` mod `n`.
+        rest_hold: Seconds each recovery holds the arm still at rest after flying home.
     """
     engine_version = git_engine_version()
     for i, path in enumerate(rollouts):
@@ -87,7 +92,10 @@ def take_over(
             continue
         rollout = load_rollout(path)
         runner = TakeoverRunner(
-            pieces=single_pawn_position(rollout.source), fps=fps, engine_version=engine_version
+            pieces=single_pawn_position(rollout.source),
+            fps=fps,
+            engine_version=engine_version,
+            rest_hold=rest_hold,
         )
         started = time.monotonic()
         rng = np.random.default_rng([seed, i])
@@ -96,6 +104,10 @@ def take_over(
             order = carry_order(trace, skip, carry_lead, carry_per_tier, rng)
         elif frame_order == "release":
             order = release_order(trace, skip, release_lead, rng)
+        elif frame_order == "placed":
+            order = placed_order(
+                runner.situation_trace(rollout.spec(), rollout.snapshots), skip, rng
+            )
         elif frame_order == "random":
             order = takeover_order(len(rollout.snapshots), skip, rng)
         else:
@@ -209,7 +221,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=FRAME_ORDERS,
         required=True,
         help="random: any frame; carry: frames carrying the piece first; release: only frames "
-        "just before the jaws were opened on the piece too high above the board",
+        "just before the jaws were opened on the piece too high above the board; placed: only "
+        "frames after the piece was placed, before the arm was back at rest",
     )
     parser.add_argument(
         "--carry-lead",
@@ -228,6 +241,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         default=30,
         help="held frames before a mid-air opening eligible under --frame-order release",
+    )
+    parser.add_argument(
+        "--rest-hold",
+        type=float,
+        default=0.0,
+        help="seconds each recovery holds the arm still at rest after flying home",
     )
     parser.add_argument("--fps", type=float, default=30.0, help="capture rate of kept episodes")
     parser.add_argument("--seed", type=int, default=0)
@@ -266,6 +285,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         fps=args.fps,
         seed=args.seed,
         shard=_parse_shard(args.shard),
+        rest_hold=args.rest_hold,
     )
     if args.no_serialize:
         return 0

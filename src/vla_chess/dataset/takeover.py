@@ -24,6 +24,7 @@ from vla_chess.control.recovery import (
     NotNearTarget,
     Situation,
     assess,
+    hold_at_rest,
     plan_recovery,
     recovery_candidates,
 )
@@ -265,6 +266,27 @@ def carry_order(
     return [int(i) for tier in (first, second, rest) for i in tier]
 
 
+def placed_order(situations: Sequence[Situation], skip: int, rng: np.random.Generator) -> list[int]:
+    """Pick the frames of a rollout where its piece stood placed and the arm was not yet home.
+
+    These are the frames between letting go of the piece on its target and coming back to rest,
+    where a takeover demonstrates backing off and flying home without touching the piece. A
+    rollout that never placed its piece has no frames to try.
+
+    Args:
+        situations: The situation at every frame of the rollout; see
+            `TakeoverRunner.situation_trace`.
+        skip: How many leading frames to leave out; the policy has barely acted on them.
+        rng: Source of the shuffle.
+
+    Returns:
+        The eligible frame indices in random order, for the caller to try until it has as many
+        takeovers as it wants.
+    """
+    eligible = [i for i in range(skip, len(situations)) if situations[i] is Situation.PLACED]
+    return [int(i) for i in rng.permutation(np.array(eligible, dtype=np.int64))]
+
+
 def takeover_order(frames: int, skip: int, rng: np.random.Generator) -> list[int]:
     """Shuffle the frames of a rollout that a takeover may start from.
 
@@ -298,6 +320,7 @@ class TakeoverRunner:
         cameras: Sequence[CameraSpec] = (WRIST_CAMERA,),
         knobs: SampleKnobs | None = None,
         engine_version: str = ENGINE_VERSION_UNKNOWN,
+        rest_hold: float = 0.0,
     ) -> None:
         """Fix the scene layout and capture settings every takeover of this runner shares.
 
@@ -311,6 +334,8 @@ class TakeoverRunner:
             knobs: The grasp lean and placement offset spread recoveries are drawn from; the
                 funnel's defaults when omitted.
             engine_version: Identifier of the engine, stamped onto each kept episode.
+            rest_hold: Seconds every recovery holds the arm still at rest after flying home,
+                so the recorded episode shows the arm staying put once the move is done.
         """
         self._pieces = tuple(pieces)
         self._fps = fps
@@ -320,6 +345,7 @@ class TakeoverRunner:
         self._cameras = tuple(cameras)
         self._knobs = knobs if knobs is not None else SampleKnobs()
         self._engine_version = engine_version
+        self._rest_hold = rest_hold
 
     def run(
         self, spec: MoveSpec, snapshot: npt.NDArray[np.float64], *, base_seed: int = 0
@@ -377,6 +403,7 @@ class TakeoverRunner:
             except PlanInfeasible:
                 rejects[PLAN_INFEASIBLE] += 1
                 continue
+            plan = hold_at_rest(plan, self._rest_hold)
             attempts += 1
             watch = grip_recorder()
             dry = executor.run(
@@ -419,6 +446,31 @@ class TakeoverRunner:
             fps=self._fps,
         )
         return TakeoverOutcome(assessment.situation, episode, attempts, rejects)
+
+    def situation_trace(
+        self, spec: MoveSpec, snapshots: npt.NDArray[np.float64]
+    ) -> list[Situation]:
+        """Read where the move stood at every snapshot of a rollout.
+
+        Args:
+            spec: The move the rollout was making.
+            snapshots: One state per frame, from `sim.snapshot.capture_state` in a scene of this
+                runner's layout built for `spec`.
+
+        Returns:
+            The situation at each snapshot, as a takeover from it would assess it.
+        """
+        description = move_scene_description(
+            spec, self._pieces, self._board_pose, self._survey_qpos
+        )
+        model, index = build_scene(description)
+        data = make_data(model, index)
+        solver = VerticalGraspSolver(model, make_data(model, index), index)
+        situations = []
+        for snapshot in snapshots:
+            restore_state(model, data, snapshot)
+            situations.append(assess(model, data, index, spec, solver).situation)
+        return situations
 
     def grip_trace(self, spec: MoveSpec, snapshots: npt.NDArray[np.float64]) -> GripTrace:
         """Read whether the moved piece was held, and its height, at every snapshot of a rollout.
@@ -485,7 +537,7 @@ def take_over_rollout(
         wanted: How many kept episodes to stop at.
         max_attempts: How many recoverable frames to try at most.
         order: The frames to try, in the order to try them; see `takeover_order`,
-            `carry_order` and `release_order`.
+            `carry_order`, `release_order` and `placed_order`.
         base_seed: Offset of the per-frame seeds; frame `f` is taken over with
             `base_seed + f`.
 

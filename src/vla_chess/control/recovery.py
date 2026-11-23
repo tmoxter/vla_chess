@@ -314,6 +314,38 @@ def plan_recovery(
     return _replace_waypoints(base, (*lead, *resume))
 
 
+def hold_at_rest(plan: Plan, seconds: float) -> Plan:
+    """Extend a plan with the arm holding still where its last leg ends.
+
+    The hold is one more leg to the last leg's target, jaw command unchanged, so the arm arrives
+    and then stays put; a plan flown from rest ends back at rest and stays there.
+
+    Args:
+        plan: The plan to extend.
+        seconds: How long to hold; zero returns the plan unchanged.
+
+    Returns:
+        The plan with the hold appended.
+
+    Raises:
+        ValueError: If `seconds` is negative.
+    """
+    if seconds < 0.0:
+        raise ValueError(f"a hold cannot last a negative time, got {seconds}")
+    if seconds == 0.0:
+        return plan
+    last = plan.waypoints[-1]
+    hold = Waypoint(
+        last.phase,
+        seconds,
+        last.gripper,
+        position=last.position,
+        qpos=last.qpos,
+        approach_axis=last.approach_axis,
+    )
+    return _replace_waypoints(plan, (*plan.waypoints, hold))
+
+
 def _replace_waypoints(plan: Plan, waypoints: tuple[Waypoint, ...]) -> Plan:
     """Copy a plan with its legs swapped out."""
     return Plan(

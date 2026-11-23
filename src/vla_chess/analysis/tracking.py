@@ -97,11 +97,17 @@ def policy_sweep_metrics(report: Mapping[str, Any], prefix: str) -> dict[str, fl
 
     Returns:
         Grasp, lift and placement rates with their 95% bounds, the mid-air opening and slipping
-        rates likewise where the report tracked them, the rollout count, the terminal piece
-        distance summary, and per-move rates when the sweep drove more than one move.
+        rates and the done and placement-at-done rates likewise where the report tracked them,
+        the rollout count, the terminal piece distance summary, and per-move rates when the sweep
+        drove more than one move.
     """
     metrics: dict[str, float] = {f"{prefix}/rollouts": float(report["rollouts"])}
-    tracked = ("opened_mid_air_rate", "slipped_mid_air_rate")
+    tracked = (
+        "opened_mid_air_rate",
+        "slipped_mid_air_rate",
+        "done_rate",
+        "placement_at_done_rate",
+    )
     for rate in ("grasp_rate", "lift_rate", "placement_rate", *(r for r in tracked if r in report)):
         metrics[f"{prefix}/{rate}"] = float(report[rate]["p"])
         metrics[f"{prefix}/{rate}_ci95_lo"] = float(report[rate]["ci95"][0])
@@ -112,7 +118,7 @@ def policy_sweep_metrics(report: Mapping[str, Any], prefix: str) -> dict[str, fl
     if len(per_move) > 1:
         for move, tally in per_move.items():
             name = move.replace("->", "_")
-            for outcome in ("grasped", "lifted", "placed", "opened_mid_air"):
+            for outcome in ("grasped", "lifted", "placed", "opened_mid_air", "placed_at_done"):
                 if outcome not in tally:
                     continue
                 metrics[f"{prefix}/{name}/{outcome}_rate"] = tally[outcome] / tally["rollouts"]
