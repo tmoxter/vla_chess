@@ -20,8 +20,13 @@ TARGET="${TARGET:-d6}"
 N_ACTION_STEPS="${N_ACTION_STEPS:-10}"
 PIECE_JITTER_MM="${PIECE_JITTER_MM:-3}"
 STEERED_STEPS="${STEERED_STEPS:-10}"
-MAGNITUDE="${MAGNITUDE:-1.5}"
+STEER="${STEER:-offset}"
+MAGNITUDE="${MAGNITUDE:-0.5}"
 FILL="${FILL:-zero}"
+SUCCESS="${SUCCESS:-done}"
+GRASP_BONUS="${GRASP_BONUS:-0}"
+LIFT_BONUS="${LIFT_BONUS:-0}"
+PLACE_BONUS="${PLACE_BONUS:-0}"
 WARMUP_EPISODES="${WARMUP_EPISODES:-20}"
 TRAIN_EPISODES="${TRAIN_EPISODES:-1000}"
 EVAL_EVERY="${EVAL_EVERY:-100}"
@@ -52,12 +57,14 @@ fi
 PY="${EVAL_VENV}/bin/python"
 common=(--checkpoint "${POLICY_IN}" --source "${SOURCE}" --target "${TARGET}" --device cuda
         --n-action-steps "${N_ACTION_STEPS}" --piece-jitter-mm "${PIECE_JITTER_MM}"
-        --steered-steps "${STEERED_STEPS}" --magnitude "${MAGNITUDE}" --fill "${FILL}")
+        --steered-steps "${STEERED_STEPS}" --steer "${STEER}" --magnitude "${MAGNITUDE}"
+        --fill "${FILL}" --success "${SUCCESS}")
 
 step "1/2 train: ${WARMUP_EPISODES} warm-up + ${TRAIN_EPISODES} episodes on ${SOURCE}->${TARGET}"
 if [[ ! -f "${OUT_DIR}/train/agent-$(printf '%05d' "${TRAIN_EPISODES}").pt" ]]; then
   rm -rf "${OUT_DIR}/train"
   "${PY}" -m vla_chess.cli.train_dsrl "${common[@]}" --out "${OUT_DIR}/train" \
+    --grasp-bonus "${GRASP_BONUS}" --lift-bonus "${LIFT_BONUS}" --place-bonus "${PLACE_BONUS}" \
     --warmup-episodes "${WARMUP_EPISODES}" --train-episodes "${TRAIN_EPISODES}" \
     --eval-every "${EVAL_EVERY}" --eval-episodes "${EVAL_EPISODES}" \
     --learn-after "${LEARN_AFTER}" --updates-per-chunk "${UPDATES_PER_CHUNK}" \

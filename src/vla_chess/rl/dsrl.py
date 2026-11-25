@@ -6,8 +6,12 @@ actor-critic on the chunk-level transitions, so the frozen policy's weights neve
 everything the agent can do is something the policy's own prior can produce.
 
 Episodes run in one of four steering modes, and a training run is a schedule of them: the frozen
-policy as trained, as a baseline; Gaussian draws on the steered block to seed the replay; the
-actor's sampled latents while learning; and the actor's mode for evaluation.
+policy as trained, as a baseline; latents drawn at random to seed the replay; the actor's sampled
+latents while learning; and the actor's mode for evaluation.
+
+Under `Steer.OFFSET` every episode of a seed draws the same Gaussian noise, chunk for chunk, and
+the latent only shifts it, so a steered episode and the frozen policy's episode on the same seed
+are paired draws.
 """
 
 from __future__ import annotations
@@ -22,14 +26,16 @@ import numpy as np
 import numpy.typing as npt
 
 from vla_chess.rl.env import Observation, Outcome, StepResult
-from vla_chess.rl.noise import Fill, NoiseLayout
+from vla_chess.rl.noise import Fill, NoiseLayout, Steer
 
 
 class Steering(Enum):
     """Where an episode's noise comes from."""
 
     BASE = "base"  # every entry a fresh Gaussian draw: the frozen policy as it was trained
-    WARMUP = "warmup"  # Gaussian draws on the steered block, stored as latents for the replay
+    # Random latents, stored for the replay: under REPLACE the Gaussian draw of the steered block,
+    # under OFFSET a uniform draw over the latent box.
+    WARMUP = "warmup"
     EXPLORE = "explore"  # the actor's sampled latent, learned from
     GREEDY = "greedy"  # the actor's mode, not learned from
 
@@ -85,8 +91,11 @@ class SteeringConfig:
     """How a latent becomes the frozen policy's initial noise."""
 
     layout: NoiseLayout
-    magnitude: float = 1.5  # noise value a latent entry of 1 stands for
-    fill: Fill = Fill.ZERO  # entries outside the steered block
+    # REPLACE: noise value a latent entry of 1 stands for; OFFSET: shift it stands for, in
+    # standard deviations of the noise.
+    magnitude: float = 1.5
+    fill: Fill = Fill.ZERO  # entries outside the steered block, under REPLACE
+    steer: Steer = Steer.REPLACE
 
 
 @dataclass(frozen=True)
@@ -138,7 +147,9 @@ def run_episode(
         raise ValueError(f"{steering.value} episodes need an agent")
     learning = agent is not None and steering in (Steering.WARMUP, Steering.EXPLORE)
     started = time.monotonic()
-    start_rng, noise_rng = (np.random.default_rng(s) for s in np.random.SeedSequence(seed).spawn(2))
+    start_rng, noise_rng, latent_rng = (
+        np.random.default_rng(s) for s in np.random.SeedSequence(seed).spawn(3)
+    )
     layout = config.layout
     encoding = policy.encode(env.reset(start_rng))
     episode_return = 0.0
@@ -149,6 +160,13 @@ def run_episode(
         noise: npt.NDArray[np.floating]
         if steering is Steering.BASE:
             noise = noise_rng.standard_normal((layout.chunk_size, layout.max_action_dim))
+        elif config.steer is Steer.OFFSET:
+            if steering is Steering.WARMUP:
+                latent = latent_rng.uniform(-1.0, 1.0, layout.latent_dim).astype(np.float32)
+            else:
+                assert agent is not None
+                latent = agent.act(encoding.features, explore=steering is Steering.EXPLORE)
+            noise = layout.offset(latent, config.magnitude, noise_rng)
         else:
             if steering is Steering.WARMUP:
                 draw = noise_rng.standard_normal((layout.chunk_size, layout.max_action_dim))

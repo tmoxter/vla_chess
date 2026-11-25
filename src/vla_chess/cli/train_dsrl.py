@@ -3,7 +3,11 @@
 Writes into --out: the run's settings (config.json), one line per warm-up and training episode
 (episodes.jsonl), one line per evaluation (evals.jsonl), and the agent after every evaluation
 (agent-<episodes>.pt, plus agent-last.pt). Evaluations score every episode as the closed-loop
-eval scores a rollout: no early stop, judged on where the piece stands after --max-frames.
+eval scores a rollout: with --success placed they run to --max-frames and are judged on where the
+piece stands then; with --success done they stop once the move is done and are judged on where
+the piece stood at that frame, a move never done within --max-frames counting as a failure.
+Training episodes also pay --grasp-bonus, --lift-bonus and --place-bonus once each, on the chunk
+where the move first reaches that stage; evaluations pay none.
 
 Runs in the `eval` pixi env. Example:
 
@@ -37,8 +41,8 @@ from vla_chess.rl.dsrl import (
     evaluate,
     train,
 )
-from vla_chess.rl.env import EnvConfig, MoveEnv
-from vla_chess.rl.noise import Fill
+from vla_chess.rl.env import EnvConfig, MoveEnv, Success
+from vla_chess.rl.noise import Fill, Steer
 
 
 def summarise(reports: list[EpisodeReport]) -> dict[str, Any]:
@@ -48,8 +52,8 @@ def summarise(reports: list[EpisodeReport]) -> dict[str, Any]:
         reports: The episodes to summarise.
 
     Returns:
-        Grasp, lift, placement, mid-air-opening and loss rates as `{"p", "ci95"}`, the mean
-        return and chunk count, and the episode count.
+        Grasp, lift, placement, mid-air-opening, loss, done and placement-at-done rates as
+        `{"p", "ci95"}`, the mean return and chunk count, and the episode count.
     """
     n = len(reports)
 
@@ -65,6 +69,8 @@ def summarise(reports: list[EpisodeReport]) -> dict[str, Any]:
         "placement_rate": rate(sum(o.placed for o in outcomes)),
         "opened_mid_air_rate": rate(sum(o.opened_mid_air for o in outcomes)),
         "lost_rate": rate(sum(o.lost for o in outcomes)),
+        "done_rate": rate(sum(o.done_frame is not None for o in outcomes)),
+        "placement_at_done_rate": rate(sum(o.placed_at_done for o in outcomes)),
         "mean_return": sum(r.episode_return for r in reports) / n if n else 0.0,
         "mean_chunks": sum(r.chunks for r in reports) / n if n else 0.0,
     }
@@ -100,8 +106,36 @@ def main() -> None:
         help="half-width of the window each episode's start is drawn from around the square centre",
     )
     parser.add_argument("--steered-steps", type=int, default=10, help="noise rows the agent sets")
-    parser.add_argument("--magnitude", type=float, default=1.5, help="noise of a latent entry of 1")
-    parser.add_argument("--fill", choices=[f.value for f in Fill], default=Fill.ZERO.value)
+    parser.add_argument(
+        "--steer",
+        choices=[s.value for s in Steer],
+        default=Steer.OFFSET.value,
+        help="replace: the latent sets the steered noise; offset: it shifts the policy's own draw",
+    )
+    parser.add_argument(
+        "--magnitude",
+        type=float,
+        default=0.5,
+        help="replace: noise of a latent entry of 1; offset: shift of one, in standard deviations",
+    )
+    parser.add_argument(
+        "--fill",
+        choices=[f.value for f in Fill],
+        default=Fill.ZERO.value,
+        help="noise outside the steered block under --steer replace",
+    )
+    parser.add_argument(
+        "--success",
+        choices=[s.value for s in Success],
+        default=Success.DONE.value,
+        help="placed: the piece stands on its target released; done: it stands there when the "
+        "arm has come back to rest (control.done)",
+    )
+    parser.add_argument("--grasp-bonus", type=float, default=0.0, help="paid on the first grasp")
+    parser.add_argument("--lift-bonus", type=float, default=0.0, help="paid on the first lift")
+    parser.add_argument(
+        "--place-bonus", type=float, default=0.0, help="paid when first placed and released"
+    )
     parser.add_argument("--warmup-episodes", type=int, default=20)
     parser.add_argument("--train-episodes", type=int, default=1000)
     parser.add_argument("--eval-every", type=int, default=100)
@@ -139,22 +173,37 @@ def main() -> None:
     )
     spec = _spec_for(0, args.source, args.target)
     jitter = args.piece_jitter_mm / 1000.0
+    success = Success(args.success)
     train_env = MoveEnv(
-        spec, EnvConfig(fps=args.fps, max_frames=args.max_frames, piece_jitter_m=jitter)
+        spec,
+        EnvConfig(
+            fps=args.fps,
+            max_frames=args.max_frames,
+            success=success,
+            piece_jitter_m=jitter,
+            grasp_bonus=args.grasp_bonus,
+            lift_bonus=args.lift_bonus,
+            place_bonus=args.place_bonus,
+        ),
     )
     eval_env = MoveEnv(
         spec,
         EnvConfig(
             fps=args.fps,
             max_frames=args.max_frames,
-            stop_on_placed=False,
+            success=success,
+            # Scored at done, an evaluation has nothing left to read once the move is done.
+            stop_on_success=success is Success.DONE,
             stop_on_lost=False,
             piece_jitter_m=jitter,
         ),
     )
     policy = SteerablePolicy(args.checkpoint, args.device, args.n_action_steps)
     config = SteeringConfig(
-        layout=policy.layout(args.steered_steps), magnitude=args.magnitude, fill=Fill(args.fill)
+        layout=policy.layout(args.steered_steps),
+        magnitude=args.magnitude,
+        fill=Fill(args.fill),
+        steer=Steer(args.steer),
     )
     schedule = Schedule(
         warmup_episodes=args.warmup_episodes,
@@ -188,9 +237,10 @@ def main() -> None:
         record = {"kind": kind, **_record(report), "replay": len(agent)}
         _append(args.out / "episodes.jsonl", record)
         o = report.outcome
+        verdict = "PLACED" if o.placed else "lost" if o.lost else "fail"
         print(
-            f"[{int(time.monotonic() - started)}s] {kind} seed {report.seed}: "
-            f"{'PLACED' if o.placed else 'lost' if o.lost else 'fail'} "
+            f"[{int(time.monotonic() - started)}s] {kind} seed {report.seed}: {verdict} "
+            f"done={o.done_frame is not None} at_done={o.placed_at_done} "
             f"grasp={o.grasped} chunks={report.chunks} updates={report.updates} "
             f"{report.wall_seconds:.1f}s",
             flush=True,
@@ -211,9 +261,11 @@ def main() -> None:
             agent.save(args.out / f"agent-{done:05d}.pt")
             agent.save(args.out / "agent-last.pt")
         g, p = summary["grasp_rate"], summary["placement_rate"]
+        d = summary["placement_at_done_rate"]
         print(
             f"=== eval after {done} train episodes, {steering.value}: grasp {g['p']:.1%} "
             f"placement {p['p']:.1%} (95% CI {p['ci95'][0]:.1%}-{p['ci95'][1]:.1%}) "
+            f"at done {d['p']:.1%} (95% CI {d['ci95'][0]:.1%}-{d['ci95'][1]:.1%}) "
             f"over {summary['episodes']} ===",
             flush=True,
         )

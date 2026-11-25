@@ -70,3 +70,18 @@ def test_save_and_load_keep_the_actor(tmp_path: Path) -> None:
     np.testing.assert_array_equal(agent.act(features, False), loaded.act(features, False))
     assert loaded.algorithm.optimization_step == agent.algorithm.optimization_step
     assert len(loaded) == 0
+
+
+def test_an_untrained_actor_picks_a_zero_latent_as_its_mode() -> None:
+    agent = _agent()
+    for seed in range(3):
+        features = np.random.default_rng(seed).standard_normal(12)
+        np.testing.assert_array_equal(agent.act(features, False), np.zeros(6, dtype=np.float32))
+
+
+def test_a_zero_mean_start_can_be_turned_off() -> None:
+    config = AgentConfig(
+        hidden_dims=(32, 32), encoder_dim=16, num_critics=4, batch_size=8, zero_mean_init=False
+    )
+    agent = SteeringAgent(feature_dim=12, latent_dim=6, config=config, device="cpu")
+    assert np.abs(agent.act(np.ones(12), False)).max() > 0.0

@@ -14,7 +14,7 @@ from vla_chess.rl.dsrl import (
     train,
 )
 from vla_chess.rl.env import Observation, Outcome, StepResult
-from vla_chess.rl.noise import Fill, NoiseLayout
+from vla_chess.rl.noise import Fill, NoiseLayout, Steer
 
 LAYOUT = NoiseLayout(chunk_size=4, max_action_dim=3, action_dim=2, steered_steps=2)
 CONFIG = SteeringConfig(layout=LAYOUT, magnitude=1.5, fill=Fill.ZERO)
@@ -31,6 +31,8 @@ def _outcome(placed: bool, frames: int) -> Outcome:
         slipped_mid_air=False,
         lost=False,
         frames=frames,
+        done_frame=None,
+        placed_at_done=False,
     )
 
 
@@ -248,3 +250,31 @@ def test_train_runs_baselines_warmup_and_periodic_evaluations() -> None:
     ]
     assert len(agent.stored) == 7 * 3
     assert agent.updates > 0
+
+
+OFFSET = SteeringConfig(layout=LAYOUT, magnitude=0.5, steer=Steer.OFFSET)
+
+
+def test_an_offset_latent_shifts_the_frozen_policys_own_draw() -> None:
+    base, steered = FakeEnv(3, True), FakeEnv(3, True)
+    run_episode(base, FakePolicy(), None, Steering.BASE, OFFSET, seed=5)
+    run_episode(steered, FakePolicy(), FakeAgent(latent=0.4), Steering.EXPLORE, OFFSET, seed=5)
+    for drawn, shifted in zip(base.actions, steered.actions, strict=True):
+        np.testing.assert_allclose(shifted[:2, :2] - drawn[:2, :2], 0.2, atol=1e-6)
+        np.testing.assert_allclose(shifted[2:], drawn[2:], atol=1e-6)
+        np.testing.assert_allclose(shifted[:, 2:], drawn[:, 2:], atol=1e-6)
+
+
+def test_offset_warmup_stores_uniform_latents_and_keeps_the_draws_paired() -> None:
+    base, warm = FakeEnv(4, True), FakeEnv(4, True)
+    agent = FakeAgent()
+    run_episode(base, FakePolicy(), None, Steering.BASE, OFFSET, seed=2)
+    run_episode(warm, FakePolicy(), agent, Steering.WARMUP, OFFSET, seed=2)
+    latents = np.stack([stored[1] for stored in agent.stored])
+    assert np.abs(latents).max() < 1.0 and latents.std() > 0.3
+    for (_, latent, *_), drawn, shifted in zip(
+        agent.stored, base.actions, warm.actions, strict=True
+    ):
+        np.testing.assert_allclose(
+            shifted[:2, :2].ravel() - drawn[:2, :2].ravel(), 0.5 * latent, atol=1e-6
+        )

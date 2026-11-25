@@ -60,3 +60,26 @@ def test_layout_rejects_blocks_outside_the_chunk(action_dim: int, steered_steps:
         NoiseLayout(
             chunk_size=50, max_action_dim=32, action_dim=action_dim, steered_steps=steered_steps
         )
+
+
+def test_offset_shifts_a_gaussian_draw_on_the_steered_block_only() -> None:
+    latent = np.linspace(-1.0, 1.0, LAYOUT.latent_dim)
+    noise = LAYOUT.offset(latent, 0.5, np.random.default_rng(3))
+    draw = np.random.default_rng(3).standard_normal((50, 32)).astype(np.float32)
+    np.testing.assert_allclose(
+        noise[:10, :6], draw[:10, :6] + 0.5 * latent.reshape(10, 6), rtol=1e-6
+    )
+    np.testing.assert_array_equal(noise[10:], draw[10:])
+    np.testing.assert_array_equal(noise[:, 6:], draw[:, 6:])
+    assert noise.dtype == np.float32
+
+
+def test_a_zero_offset_is_the_frozen_policys_own_draw() -> None:
+    noise = LAYOUT.offset(np.zeros(LAYOUT.latent_dim), 0.5, np.random.default_rng(4))
+    draw = np.random.default_rng(4).standard_normal((50, 32))
+    np.testing.assert_allclose(noise, draw, rtol=1e-6)
+
+
+def test_offset_rejects_a_latent_of_the_wrong_size() -> None:
+    with pytest.raises(ValueError, match="latent has shape"):
+        LAYOUT.offset(np.zeros(5), 0.5, np.random.default_rng(0))

@@ -45,6 +45,8 @@ class AgentConfig:
     target_entropy: float | None = None  # None: -latent_dim / 2
     batch_size: int = 256
     buffer_capacity: int = 200_000
+    # Start the actor's mean at zero for every observation, so its mode is the zero latent.
+    zero_mean_init: bool = True
 
 
 class SteeringAgent:
@@ -73,6 +75,10 @@ class SteeringAgent:
             actor_network_kwargs=ActorNetworkConfig(hidden_dims=hidden),
         )
         self.policy = GaussianActorPolicy(actor_config)
+        if config.zero_mean_init:
+            with torch.no_grad():
+                self.policy.actor.mean_layer.weight.zero_()
+                self.policy.actor.mean_layer.bias.zero_()
         self.algorithm = SACAlgorithm(
             self.policy,
             SACAlgorithmConfig(
